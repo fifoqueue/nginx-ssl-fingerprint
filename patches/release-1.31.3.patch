@@ -1,5 +1,5 @@
 diff --git a/src/event/ngx_event_openssl.c b/src/event/ngx_event_openssl.c
-index 99ec654..0582307 100644
+index c6f9538..51b6b78 100644
 --- a/src/event/ngx_event_openssl.c
 +++ b/src/event/ngx_event_openssl.c
 @@ -14,6 +14,7 @@
@@ -58,7 +58,7 @@ index 99ec654..0582307 100644
                                    (const unsigned char **) &p, &len)
          == 0)
 diff --git a/src/event/ngx_event_openssl.h b/src/event/ngx_event_openssl.h
-index 79ae395..26e8f4d 100644
+index 12ac01b..dd47db7 100644
 --- a/src/event/ngx_event_openssl.h
 +++ b/src/event/ngx_event_openssl.h
 @@ -149,6 +149,13 @@ struct ngx_ssl_connection_s {
@@ -76,7 +76,7 @@ index 79ae395..26e8f4d 100644
  
  
 diff --git a/src/http/v2/ngx_http_v2.c b/src/http/v2/ngx_http_v2.c
-index efe2290..0e88a71 100644
+index ebf724d..97b65b1 100644
 --- a/src/http/v2/ngx_http_v2.c
 +++ b/src/http/v2/ngx_http_v2.c
 @@ -1342,6 +1342,14 @@ ngx_http_v2_state_headers(ngx_http_v2_connection_t *h2c, u_char *pos,
@@ -110,7 +110,7 @@ index efe2290..0e88a71 100644
          rc = ngx_http_v2_pseudo_header(r, header);
  
          if (rc == NGX_OK) {
-@@ -2209,6 +2226,14 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
+@@ -2212,6 +2229,14 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
          ngx_log_debug2(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
                         "http2 setting %ui:%ui", id, value);
  
@@ -125,7 +125,7 @@ index efe2290..0e88a71 100644
          switch (id) {
  
          case NGX_HTTP_V2_INIT_WINDOW_SIZE_SETTING:
-@@ -2493,6 +2518,9 @@ ngx_http_v2_state_window_update(ngx_http_v2_connection_t *h2c, u_char *pos,
+@@ -2500,6 +2525,9 @@ ngx_http_v2_state_window_update(ngx_http_v2_connection_t *h2c, u_char *pos,
      }
  
      h2c->send_window += window;
@@ -136,7 +136,7 @@ index efe2290..0e88a71 100644
      while (!ngx_queue_empty(&h2c->waiting)) {
          q = ngx_queue_head(&h2c->waiting);
 diff --git a/src/http/v2/ngx_http_v2.h b/src/http/v2/ngx_http_v2.h
-index 9605c8a..521e68b 100644
+index beb77a5..d14d535 100644
 --- a/src/http/v2/ngx_http_v2.h
 +++ b/src/http/v2/ngx_http_v2.h
 @@ -17,6 +17,8 @@
@@ -148,7 +148,7 @@ index 9605c8a..521e68b 100644
  #define NGX_HTTP_V2_DEFAULT_FRAME_SIZE   (1 << 14)
  #define NGX_HTTP_V2_MAX_FRAME_SIZE       ((1 << 24) - 1)
  
-@@ -121,6 +123,13 @@ typedef struct {
+@@ -122,6 +124,13 @@ typedef struct {
  } ngx_http_v2_hpack_t;
  
  
@@ -162,7 +162,7 @@ index 9605c8a..521e68b 100644
  struct ngx_http_v2_connection_s {
      ngx_connection_t                *connection;
      ngx_http_connection_t           *http_connection;
-@@ -168,6 +177,10 @@ struct ngx_http_v2_connection_s {
+@@ -169,6 +178,10 @@ struct ngx_http_v2_connection_s {
      unsigned                         table_update:1;
      unsigned                         blocked:1;
      unsigned                         goaway:1;
@@ -173,7 +173,7 @@ index 9605c8a..521e68b 100644
  };
  
  
-@@ -222,6 +235,14 @@ struct ngx_http_v2_stream_s {
+@@ -223,6 +236,14 @@ struct ngx_http_v2_stream_s {
      unsigned                         rst_sent:1;
      unsigned                         no_flow_control:1;
      unsigned                         skip_data:1;

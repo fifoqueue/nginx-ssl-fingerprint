@@ -199,7 +199,7 @@ unsigned char *append_uint32(unsigned char* dst, uint32_t n)
  */
 int ngx_ssl_ja3(ngx_connection_t *c)
 {
-    u_char *ptr = NULL, *data = NULL;
+    u_char *ptr = NULL, *data = NULL, *end = NULL;
     size_t num = 0, i;
     uint16_t n, greased = 0;
 
@@ -221,8 +221,14 @@ int ngx_ssl_ja3(ngx_connection_t *c)
         return NGX_OK;
     }
 
-    c->ssl->fp_ja3_str.len = c->ssl->fp_ja_data.len * 4;
-    c->ssl->fp_ja3_str.data = ngx_pnalloc(c->pool, c->ssl->fp_ja3_str.len);
+    end = data + c->ssl->fp_ja_data.len;
+    if ((size_t) (end - data) < sizeof(uint16_t) * 2) {
+        goto invalid;
+    }
+
+    c->ssl->fp_ja3_str.len = c->ssl->fp_ja_data.len * 6 + sizeof("65535,");
+    c->ssl->fp_ja3_str.data = ngx_pnalloc(NGX_SSL_FP_POOL(c),
+                                          c->ssl->fp_ja3_str.len);
     if (c->ssl->fp_ja3_str.data == NULL) {
         /** Else we break a data stream */
         c->ssl->fp_ja3_str.len = 0;
@@ -239,6 +245,9 @@ int ngx_ssl_ja3(ngx_connection_t *c)
 
     /* ciphers */
     num = *(uint16_t*)data;
+    if (num > (size_t) (end - data) - sizeof(uint16_t)) {
+        goto invalid;
+    }
     for (i = 2; i <= num; i += 2) {
         n = ((uint16_t)data[i]) << 8 | ((uint16_t)data[i+1]);
         if (!IS_GREASE_CODE(n)) {
@@ -255,7 +264,13 @@ int ngx_ssl_ja3(ngx_connection_t *c)
     data += 2 + num;
 
     /* extensions */
+    if ((size_t) (end - data) < sizeof(uint16_t)) {
+        goto invalid;
+    }
     num = *(uint16_t*)data;
+    if (num > (size_t) (end - data) - sizeof(uint16_t)) {
+        goto invalid;
+    }
     for (i = 2; i <= num; i += 2) {
         n = *(uint16_t*)(data+i);
         if (!IS_GREASE_CODE(n)) {
@@ -272,7 +287,13 @@ int ngx_ssl_ja3(ngx_connection_t *c)
 
 
     /* groups */
+    if ((size_t) (end - data) < sizeof(uint16_t)) {
+        goto invalid;
+    }
     num = *(uint16_t*)data;
+    if (num > (size_t) (end - data)) {
+        goto invalid;
+    }
     for (i = 2; i + 1 < num; i += 2) {
         n = ((uint16_t)data[i]) << 8 | ((uint16_t)data[i+1]);
         if (!IS_GREASE_CODE(n)) {
@@ -288,7 +309,13 @@ int ngx_ssl_ja3(ngx_connection_t *c)
     }
 
     /* formats */
+    if ((size_t) (end - data) < sizeof(uint8_t)) {
+        goto invalid;
+    }
     num = *(uint8_t*)data;
+    if (num > (size_t) (end - data)) {
+        goto invalid;
+    }
     for (i = 1; i < num; i++) {
         ptr = append_uint16(ptr, (uint16_t)data[i]);
         *ptr++ = '-';
@@ -308,6 +335,15 @@ int ngx_ssl_ja3(ngx_connection_t *c)
     ngx_log_debug(NGX_LOG_DEBUG_EVENT, c->log, 0, "ngx_ssl_ja3: ja3 str=[%V], len=[%d]", &c->ssl->fp_ja3_str, c->ssl->fp_ja3_str.len);
 
     return NGX_OK;
+
+invalid:
+
+    ngx_log_error(NGX_LOG_WARN, c->log, 0,
+            "ngx_ssl_ja3: invalid fp_ja_data");
+    c->ssl->fp_ja3_str.data = NULL;
+    c->ssl->fp_ja3_str.len = 0;
+
+    return NGX_ERROR;
 }
 
 /**
@@ -332,7 +368,8 @@ int ngx_ssl_ja3_hash(ngx_connection_t *c)
     }
 
     c->ssl->fp_ja3_hash.len = 32;
-    c->ssl->fp_ja3_hash.data = ngx_pnalloc(c->pool, c->ssl->fp_ja3_hash.len);
+    c->ssl->fp_ja3_hash.data = ngx_pnalloc(NGX_SSL_FP_POOL(c),
+                                           c->ssl->fp_ja3_hash.len);
     if (c->ssl->fp_ja3_hash.data == NULL) {
         /** Else we can break a stream */
         c->ssl->fp_ja3_hash.len = 0;
@@ -668,14 +705,6 @@ int ngx_ssl_ja4(ngx_connection_t *c)
                 }
             }
 
-            for (i = 1; i < sigalg_count; i++) {
-                n = hash_buf[i];
-                for (j = i; j > 0 && hash_buf[j - 1] > n; j--) {
-                    hash_buf[j] = hash_buf[j - 1];
-                }
-                hash_buf[j] = n;
-            }
-
             for (i = 0; i < sigalg_count; i++) {
                 hash_part[0] = hex[(hash_buf[i] >> 12) & 0xf];
                 hash_part[1] = hex[(hash_buf[i] >> 8) & 0xf];
@@ -702,7 +731,8 @@ int ngx_ssl_ja4(ngx_connection_t *c)
 
     /* ja4 str */
     c->ssl->fp_ja4_str.len = ngx_ssl_ja4_str_max_len;
-    c->ssl->fp_ja4_str.data = ngx_pnalloc(c->pool, c->ssl->fp_ja4_str.len);
+    c->ssl->fp_ja4_str.data = ngx_pnalloc(NGX_SSL_FP_POOL(c),
+                                          c->ssl->fp_ja4_str.len);
     if (c->ssl->fp_ja4_str.data == NULL) {
         /** Else we break a data stream */
         c->ssl->fp_ja4_str.len = 0;
@@ -775,75 +805,84 @@ int ngx_ssl_ja4(ngx_connection_t *c)
 
 /**
  * Params:
- *      c and h2c should be a valid pointers
+ *      r should be a valid h2 request
  *
  * Returns:
- *      NGX_OK -- h2c->fp_str is set
+ *      NGX_OK -- *out is set
  *      NGX_ERROR -- something went wrong
  */
-int ngx_http2_fingerprint(ngx_connection_t *c, ngx_http_v2_connection_t *h2c)
+int ngx_http2_fingerprint(ngx_http_request_t *r, ngx_str_t *out)
 {
+    ngx_http_v2_stream_t      *stream = r->stream;
+    ngx_http_v2_connection_t  *h2c = stream->connection;
     unsigned char *pstr = NULL;
     unsigned short n = 0;
-    size_t i;
+    size_t i, j;
+    uint16_t id;
 
-    if (h2c->fp_str.len > 0) {
-        return NGX_OK;
-    }
+    n = 4 + h2c->fp_settings.len * 17
+        + 10 + 30
+        + stream->fp_pseudoheaders_len * 2;
 
-    n = 4 + h2c->fp_settings.len * 3
-        + 10 + h2c->fp_priorities.len * 4
-        + h2c->fp_pseudoheaders.len * 2;
-
-    h2c->fp_str.data = ngx_pnalloc(c->pool, n);
-    if (h2c->fp_str.data == NULL) {
+    out->data = ngx_pnalloc(r->pool, n);
+    if (out->data == NULL) {
         /** Else we break a stream */
         return NGX_ERROR;
     }
-    pstr = h2c->fp_str.data;
+    pstr = out->data;
 
-    ngx_log_debug(NGX_LOG_DEBUG_EVENT, c->log, 0, "ngx_http2_fingerprint: alloc bytes: [%d]\n", n);
+    ngx_log_debug(NGX_LOG_DEBUG_EVENT, r->connection->log, 0, "ngx_http2_fingerprint: alloc bytes: [%d]\n", n);
 
     /* setting */
-    for (i = 0; i < h2c->fp_settings.len; i+=5) {
-        pstr = append_uint8(pstr, h2c->fp_settings.data[i]);
+    for (i = 0, j = 0; i < h2c->fp_settings.len; i++) {
+        id = h2c->fp_settings.ids[i];
+        if (IS_GREASE_CODE(id)) {
+            continue;
+        }
+        if (j++ > 0) {
+            *pstr++ = ';';
+        }
+        pstr = append_uint16(pstr, id);
         *pstr++ = ':';
-        pstr = append_uint32(pstr, *(uint32_t*)(h2c->fp_settings.data+i+1));
-        *pstr++ = ';';
+        pstr = append_uint32(pstr, h2c->fp_settings.values[i]);
     }
-    *(pstr-1) = '|';
+    *pstr++ = '|';
 
     /* windows update */
     pstr = append_uint32(pstr, h2c->fp_windowupdate);
     *pstr++ = '|';
 
     /* priorities */
-    for (i = 0; i < h2c->fp_priorities.len; i+=4) {
-        pstr = append_uint8(pstr, h2c->fp_priorities.data[i]);
+    if (stream->fp_priority_set) {
+        pstr = append_uint32(pstr, stream->fp_priority_sid);
         *pstr++ = ':';
-        pstr = append_uint8(pstr, h2c->fp_priorities.data[i+1]);
+        pstr = append_uint8(pstr, stream->fp_priority_excl);
         *pstr++ = ':';
-        pstr = append_uint8(pstr, h2c->fp_priorities.data[i+2]);
+        pstr = append_uint32(pstr, stream->fp_priority_dep);
         *pstr++ = ':';
-        pstr = append_uint16(pstr, (uint16_t)h2c->fp_priorities.data[i+3]+1);
-        *pstr++ = ',';
+        pstr = append_uint16(pstr, (uint16_t)stream->fp_priority_weight+1);
+    } else {
+        *pstr++ = '0';
     }
-    *(pstr-1) = '|';
+    *pstr++ = '|';
 
     /* fp_pseudoheaders */
-    for (i = 0; i < h2c->fp_pseudoheaders.len; i++) {
-        *pstr++ = h2c->fp_pseudoheaders.data[i];
+    for (i = 0; i < stream->fp_pseudoheaders_len; i++) {
+        *pstr++ = stream->fp_pseudoheaders[i];
         *pstr++ = ',';
     }
 
     /* null terminator */
-    *--pstr = 0;
+    if (stream->fp_pseudoheaders_len != 0) {
+        pstr--;
+    }
+    *pstr = 0;
 
-    h2c->fp_str.len = pstr - h2c->fp_str.data;
+    out->len = pstr - out->data;
 
     h2c->fp_fingerprinted = 1;
 
-    ngx_log_debug(NGX_LOG_DEBUG_EVENT, c->log, 0, "ngx_http2_fingerprint: http2 fingerprint: [%V], len=[%d]\n", &h2c->fp_str, h2c->fp_str.len);
+    ngx_log_debug(NGX_LOG_DEBUG_EVENT, r->connection->log, 0, "ngx_http2_fingerprint: http2 fingerprint: [%V], len=[%d]\n", out, out->len);
 
     return NGX_OK;
 }

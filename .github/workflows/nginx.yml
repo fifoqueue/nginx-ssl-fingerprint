@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        openssl: [openssl-3.5.6, openssl-3.6.2]
-        nginx: [release-1.29.8, release-1.30.0]
+        openssl: [openssl-3.5.6, openssl-3.6.2, openssl-4.0.1]
+        nginx: [release-1.29.8, release-1.30.0, release-1.31.3]
     steps:
       - name: Dependency
         run: |
@@ -31,13 +31,14 @@ jobs:
       - name: Build
         run: |
           cd nginx
-          ASAN_OPTIONS=symbolize=1 ./auto/configure --with-openssl=$(pwd)/../openssl --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-debug --with-stream --with-http_v2_module --with-cc-opt="-fsanitize=address -O -fno-omit-frame-pointer -DNGX_DEBUG_PALLOC=1" --with-ld-opt="-L/usr/local/lib -Wl,-E -lasan"
+          ASAN_OPTIONS=symbolize=1 ./auto/configure --with-openssl=$(pwd)/../openssl --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-debug --with-stream --with-http_v2_module --with-http_v3_module --with-cc-opt="-fsanitize=address -O -fno-omit-frame-pointer -DNGX_DEBUG_PALLOC=1" --with-ld-opt="-L/usr/local/lib -Wl,-E -lasan"
           make -j$(nproc)
       - name: Test HTTP module
         run: |
           nohup nginx/objs/nginx -p . -c nginx-ssl-fingerprint/nginx.conf </dev/null &>nginx.log &
           sleep 2
           curl -kv https://127.0.0.1:4433
+          python3 nginx-ssl-fingerprint/tests/test_fingerprint.py
           cat nginx.log
       - name: Test Stream module
         run: |
