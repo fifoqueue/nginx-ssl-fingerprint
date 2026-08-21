@@ -14,6 +14,8 @@ static ngx_int_t ngx_http_ssl_ja3_hash(ngx_http_request_t *r,
                              ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_ssl_ja4(ngx_http_request_t *r,
                             ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_ssl_ja4_r(ngx_http_request_t *r,
+                            ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_http2_fingerprint(ngx_http_request_t *r,
                             ngx_http_variable_value_t *v, uintptr_t data);
 
@@ -51,6 +53,8 @@ static ngx_http_variable_t ngx_http_ssl_fingerprint_variables_list[] = {
      0, 0, 0},
     {ngx_string("http_ssl_ja4"), NULL, ngx_http_ssl_ja4,
      0, 0, 0},
+    {ngx_string("http_ssl_ja4_r"), NULL, ngx_http_ssl_ja4_r,
+     0, 0, 0},
     {ngx_string("http2_fingerprint"), NULL, ngx_http_http2_fingerprint,
      0, 0, 0},
     ngx_http_null_variable
@@ -68,7 +72,9 @@ ngx_http_ssl_greased(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    if (ngx_ssl_ja3(r->connection) != NGX_OK) {
+    if (r->connection->ssl->fp_ja3_str.data == NULL
+        && ngx_ssl_ja3(r->connection) != NGX_OK)
+    {
         return NGX_OK;
     }
 
@@ -92,7 +98,9 @@ ngx_http_ssl_ja3(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    if (ngx_ssl_ja3(r->connection) != NGX_OK) {
+    if (r->connection->ssl->fp_ja3_str.data == NULL
+        && ngx_ssl_ja3(r->connection) != NGX_OK)
+    {
         return NGX_OK;
     }
 
@@ -116,7 +124,9 @@ ngx_http_ssl_ja3_hash(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    if (ngx_ssl_ja3_hash(r->connection) != NGX_OK) {
+    if (r->connection->ssl->fp_ja3_hash.data == NULL
+        && ngx_ssl_ja3_hash(r->connection) != NGX_OK)
+    {
         return NGX_OK;
     }
 
@@ -140,12 +150,38 @@ ngx_http_ssl_ja4(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    if (ngx_ssl_ja4(r->connection) != NGX_OK) {
+    if (r->connection->ssl->fp_ja4_str.data == NULL
+        && ngx_ssl_ja4(r->connection) != NGX_OK)
+    {
         return NGX_OK;
     }
 
     v->data = r->connection->ssl->fp_ja4_str.data;
     v->len = r->connection->ssl->fp_ja4_str.len;
+    v->not_found = 0;
+    v->valid = 1;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_ssl_ja4_r(ngx_http_request_t *r,
+                   ngx_http_variable_value_t *v, uintptr_t data)
+{
+    v->not_found = 1;
+
+    if (r->connection->ssl == NULL) {
+        return NGX_OK;
+    }
+
+    if (r->connection->ssl->fp_ja4_r_str.data == NULL
+        && ngx_ssl_ja4(r->connection) != NGX_OK)
+    {
+        return NGX_OK;
+    }
+
+    v->data = r->connection->ssl->fp_ja4_r_str.data;
+    v->len = r->connection->ssl->fp_ja4_r_str.len;
     v->not_found = 0;
     v->valid = 1;
 

@@ -13,26 +13,33 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         openssl: [openssl-3.5.6, openssl-3.6.2, openssl-4.0.1]
-        nginx: [release-1.29.8, release-1.30.0, release-1.31.3]
+        nginx: [release-1.29.8, release-1.30.0, release-1.31.3, release-1.31.4]
+    env:
+      OPENSSL_VERSION: ${{ matrix.openssl }}
+      NGINX_VERSION: ${{ matrix.nginx }}
     steps:
       - name: Dependency
         run: |
-          sudo apt update -y && sudo apt-get install -y libpcre3 libpcre3-dev
-      - name: Clone
+          sudo apt-get update -y
+          sudo apt-get install -y libpcre2-dev
+      - uses: actions/checkout@v4
+        with:
+          path: nginx-ssl-fingerprint
+      - name: Clone dependencies
         run: |
-          git clone -b ${{ matrix.openssl }} --depth=1 https://github.com/openssl/openssl
-          git clone -b ${{ matrix.nginx }} --depth=1 https://github.com/nginx/nginx
-          git clone -b master https://github.com/${GITHUB_REPOSITORY}
+          git clone -b "$OPENSSL_VERSION" --depth=1 https://github.com/openssl/openssl
+          git clone -b "$NGINX_VERSION" --depth=1 https://github.com/nginx/nginx
       - name: Patch
         run: |
-          patch -p1 -d openssl < nginx-ssl-fingerprint/patches/${{ matrix.openssl }}.patch
-          patch -p1 -d nginx < nginx-ssl-fingerprint/patches/${{ matrix.nginx }}.patch
+          patch -p1 -d openssl < "nginx-ssl-fingerprint/patches/$OPENSSL_VERSION.patch"
+          patch -p1 -d nginx < "nginx-ssl-fingerprint/patches/$NGINX_VERSION.patch"
       - name: Build
         run: |
           cd nginx
-          ASAN_OPTIONS=symbolize=1 ./auto/configure --with-openssl=$(pwd)/../openssl --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-debug --with-stream --with-http_v2_module --with-http_v3_module --with-cc-opt="-fsanitize=address -O -fno-omit-frame-pointer -DNGX_DEBUG_PALLOC=1" --with-ld-opt="-L/usr/local/lib -Wl,-E -lasan"
+          ASAN_OPTIONS=symbolize=1 ./auto/configure --with-openssl=$(pwd)/../openssl --with-openssl-opt=no-tests --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-debug --with-stream --with-http_v2_module --with-http_v3_module --with-cc-opt="-fsanitize=address -O -fno-omit-frame-pointer -DNGX_DEBUG_PALLOC=1" --with-ld-opt="-L/usr/local/lib -Wl,-E -lasan"
           make -j$(nproc)
       - name: Test HTTP module
         run: |

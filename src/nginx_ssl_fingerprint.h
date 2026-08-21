@@ -13,8 +13,8 @@
 
 #define NGX_SSL_FP_POOL(c)  ((c)->ssl->fp_pool ? (c)->ssl->fp_pool : (c)->pool)
 
-size_t ngx_ssl_client_hello_get_ja_data(ngx_ssl_conn_t *ssl, u_char *data,
-    size_t data_size);
+ngx_int_t ngx_ssl_client_hello_get_ja_data(ngx_ssl_conn_t *ssl,
+    ngx_pool_t *pool, ngx_str_t *out);
 int ngx_ssl_ja3(ngx_connection_t *c);
 int ngx_ssl_ja3_hash(ngx_connection_t *c);
 int ngx_ssl_ja4(ngx_connection_t *c);

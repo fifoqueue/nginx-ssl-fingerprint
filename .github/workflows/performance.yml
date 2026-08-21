@@ -7,75 +7,106 @@ on:
     branches:
       - master
   workflow_dispatch:
+
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        openssl: [openssl-3.6.2]
-        nginx: [release-1.30.0]
+    env:
+      OPENSSL_VERSION: openssl-4.0.1
+      NGINX_VERSION: release-1.31.4
     steps:
       - name: Install packages
-        run: sudo apt update -y && sudo apt-get install -y wrk  libpcre3 libpcre3-dev
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wrk nghttp2-client libpcre2-dev
+      - uses: actions/checkout@v4
+        with:
+          path: nginx-ssl-fingerprint
       - name: Config
         run: |
-          cat <<EOF > nginx.conf
-          worker_processes auto;
+          cat <<'EOF' > baseline.conf
+          worker_processes 1;
           pid nginx.pid;
           error_log /dev/stdout error;
           events {
-              worker_connections  4096;
+              worker_connections 4096;
           }
           http {
               server {
-                  listen                 0.0.0.0:4433 ssl;
+                  listen                 127.0.0.1:4433 ssl;
                   http2                  on;
-                  access_log             /dev/null;
+                  keepalive_requests     10000000;
+                  access_log             off;
                   ssl_certificate_key    "data:-----BEGIN EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIL02pwZutbzkmdIM0QpvD7W3pcL2dGaeWrbQ8pNCHPFeoAoGCCqGSM49\nAwEHoUQDQgAE0Jektzpg3tJx3iPU05WwG4GweCwGWv87kkZQGB+6vG/kQQeOhnZ7\n7TCroQgY4ZVnBRZTD0lvxSyR6rwt3lWQ4A==\n-----END EC PRIVATE KEY-----\n";
                   ssl_certificate        "data:-----BEGIN CERTIFICATE-----\nMIIBtjCCAV2gAwIBAgIUN/O0uv7B+18ohuf05ygsoC82liswCgYIKoZIzj0EAwIw\nMTELMAkGA1UEBhMCVVMxDDAKBgNVBAsMA1dlYjEUMBIGA1UEAwwLZXhhbXBsZS5v\ncmcwHhcNMjIwNzI4MTgzMzA2WhcNMjMwNzI5MTgzMzA2WjAxMQswCQYDVQQGEwJV\nUzEMMAoGA1UECwwDV2ViMRQwEgYDVQQDDAtleGFtcGxlLm9yZzBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABNCXpLc6YN7Scd4j1NOVsBuBsHgsBlr/O5JGUBgfurxv\n5EEHjoZ2e+0wq6EIGOGVZwUWUw9Jb8Uskeq8Ld5VkOCjUzBRMB0GA1UdDgQWBBSH\n9cc3JRcpyPh3nEa41Ux6RDGjLTAfBgNVHSMEGDAWgBSH9cc3JRcpyPh3nEa41Ux6\nRDGjLTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIChRR5U7MMYQ\ntMK0zhNnt2SqRy30VcPIm9qoEms5cNxdAiBb273P7vSkj/PmDd1WsFVkg9NymBaT\n0nsIem2LKav60g==\n-----END CERTIFICATE-----\n";
                   default_type           "application/json";
-                  return                 200 "#____________________________http2_fingerprint\n#__________________________________________________________________________________________________________________________________________________________________________________________________________________________http_ssl_ja3\nPADDING PADDING PADDING PADDINGPADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING\n";
+                  set                    $fingerprints "#_http_ssl_ja3|#_http_ssl_ja4|#_http_ssl_ja4_r|#_http2_fingerprint";
+                  return                 200 "PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING PADDING\n";
               }
           }
           EOF
-          cat nginx.conf
-      - name: Clone
+          sed -E 's/#_+http/$http/g' baseline.conf > fingerprint.conf
+      - name: Clone dependencies
         run: |
-          git clone -b ${{ matrix.openssl }} --depth=1 https://github.com/openssl/openssl
-          git clone -b ${{ matrix.nginx }} --depth=1 https://github.com/nginx/nginx
-          git clone -b master https://github.com/${GITHUB_REPOSITORY}
-      - name: Baseline Build
+          git clone -b "$OPENSSL_VERSION" --depth=1 https://github.com/openssl/openssl
+          git clone -b "$NGINX_VERSION" --depth=1 https://github.com/nginx/nginx
+      - name: Baseline build
         run: |
           cd nginx
-          ./auto/configure --with-openssl=$(pwd)/../openssl --with-http_ssl_module --with-stream_ssl_module --with-stream --with-http_v2_module
+          ./auto/configure --with-openssl=$(pwd)/../openssl --with-openssl-opt=no-tests --with-http_ssl_module --with-stream_ssl_module --with-stream --with-http_v2_module
           make -j$(nproc)
-      - name: Baseline Performance
-        run: |
-          nginx/objs/nginx -p . -c nginx.conf
-          sleep 1
-          curl -ksSf https://127.0.0.1:4433
-          wrk -c 2000 -d 30s -t 2 https://127.0.0.1:4433 | tee performance-baseline.txt
+          cp objs/nginx ../nginx-baseline
       - name: Patch
         run: |
-          patch -p1 -d openssl < nginx-ssl-fingerprint/patches/${{ matrix.openssl }}.patch
-          patch -p1 -d nginx < nginx-ssl-fingerprint/patches/${{ matrix.nginx }}.patch
-      - name: Build
+          patch -p1 -d openssl < "nginx-ssl-fingerprint/patches/$OPENSSL_VERSION.patch"
+          patch -p1 -d nginx < "nginx-ssl-fingerprint/patches/$NGINX_VERSION.patch"
+      - name: Fingerprint build
         run: |
           cd nginx
-          ./auto/configure --with-openssl=$(pwd)/../openssl --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-stream --with-http_v2_module
+          ./auto/configure --with-openssl=$(pwd)/../openssl --with-openssl-opt=no-tests --add-module=$(pwd)/../nginx-ssl-fingerprint --with-http_ssl_module --with-stream_ssl_module --with-stream --with-http_v2_module
           make -j$(nproc)
-      - name: Performance
+      - name: Benchmark
         run: |
-          kill -9 $(pgrep nginx)
-          sleep 1
-          sed -i -E 's/#_+http/$http/g' nginx.conf
-          nginx/objs/nginx -p . -c nginx.conf
-          sleep 1
-          curl -ksSf https://127.0.0.1:4433
-          wrk -c 2000 -d 30s -t 2 https://127.0.0.1:4433 | tee performance-fingerprint.txt
-      - name: Result
-        run: |
-          echo '------------- Nginx Baseline -------------'
-          cat performance-baseline.txt
-          echo '------------- Nginx With Fingerprint -------------'
-          cat performance-fingerprint.txt
+          run_benchmark() {
+            label=$1
+            binary=$2
+            config=$3
+            mode=${4:-keepalive}
+
+            taskset -c 0 "$binary" -e /dev/stderr -p "$PWD" -c "$config"
+            sleep 1
+            curl -ksSf https://127.0.0.1:4433 >/dev/null
+
+            if [ "$mode" = close ]; then
+              args=(-c 50 -d 10s -t 1 -H 'Connection: close')
+            else
+              args=(-c 500 -d 15s -t 1)
+            fi
+
+            if [ "$mode" = h2 ]; then
+              taskset -c 1 h2load -n 1000 -c 10 -m 100 https://127.0.0.1:4433 >/dev/null
+            else
+              taskset -c 1 wrk -c 50 -d 2s -t 1 https://127.0.0.1:4433 >/dev/null
+            fi
+            echo "------------- $label -------------"
+            if [ "$mode" = h2 ]; then
+              taskset -c 1 h2load -D 15 -c 50 -m 100 https://127.0.0.1:4433
+            else
+              taskset -c 1 wrk "${args[@]}" https://127.0.0.1:4433
+            fi
+            "$binary" -e /dev/stderr -p "$PWD" -c "$config" -s quit
+            sleep 1
+          }
+
+          run_benchmark baseline-1 ./nginx-baseline baseline.conf
+          run_benchmark fingerprint-1 ./nginx/objs/nginx fingerprint.conf
+          run_benchmark fingerprint-2 ./nginx/objs/nginx fingerprint.conf
+          run_benchmark baseline-2 ./nginx-baseline baseline.conf
+          run_benchmark baseline-handshakes-1 ./nginx-baseline baseline.conf close
+          run_benchmark fingerprint-handshakes-1 ./nginx/objs/nginx fingerprint.conf close
+          run_benchmark fingerprint-handshakes-2 ./nginx/objs/nginx fingerprint.conf close
+          run_benchmark baseline-handshakes-2 ./nginx-baseline baseline.conf close
+          run_benchmark baseline-h2-1 ./nginx-baseline baseline.conf h2
+          run_benchmark fingerprint-h2-1 ./nginx/objs/nginx fingerprint.conf h2
+          run_benchmark fingerprint-h2-2 ./nginx/objs/nginx fingerprint.conf h2
+          run_benchmark baseline-h2-2 ./nginx-baseline baseline.conf h2

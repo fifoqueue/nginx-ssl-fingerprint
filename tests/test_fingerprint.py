@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -10,6 +11,7 @@ HOST = os.getenv("NGINX_HOST", "127.0.0.1")
 HTTP_PORT = int(os.getenv("NGINX_HTTP_PORT", "4433"))
 STREAM_PORT = int(os.getenv("NGINX_STREAM_PORT", "4443"))
 OPENSSL_BIN = os.getenv("OPENSSL_BIN")
+CURL_BIN = os.getenv("CURL_BIN") or shutil.which("curl")
 
 
 def is_grease(value):
@@ -140,18 +142,25 @@ def fingerprints(client_hello):
         else "0" * 12
     )
 
-    ja4 = (
+    ja4_a = (
         f"t{ja4_version}{'d' if 0 in extension_types else 'i'}"
         f"{min(len(clean_ciphers), 99):02d}"
         f"{min(len(clean_extensions), 99):02d}{alpn}"
-        f"_{cipher_hash}_{extension_hash}"
     )
+    ja4 = f"{ja4_a}_{cipher_hash}_{extension_hash}"
+    ja4_r = f"{ja4_a}_{cipher_material}_{extension_material}"
     greased = any(
         is_grease(value)
         for value in ciphers + extension_types + groups
     )
 
-    return ja3, hashlib.md5(ja3.encode()).hexdigest(), ja4, str(int(greased))
+    return (
+        ja3,
+        hashlib.md5(ja3.encode()).hexdigest(),
+        ja4,
+        ja4_r,
+        str(int(greased)),
+    )
 
 
 def request(port, alpn_protocols=None):
@@ -194,11 +203,12 @@ class FingerprintTest(unittest.TestCase):
             for line in response.replace("\r", "").splitlines()
             if ": " in line
         )
-        ja3, ja3_hash, ja4, greased = fingerprints(client_hello)
+        ja3, ja3_hash, ja4, ja4_r, greased = fingerprints(client_hello)
 
         self.assertEqual(values["ja3"], ja3)
         self.assertEqual(values["ja3_hash"], ja3_hash)
         self.assertEqual(values["ja4"], ja4)
+        self.assertEqual(values["ja4_r"], ja4_r)
         self.assertEqual(values["greased"], greased)
 
     def test_http(self):
@@ -213,6 +223,29 @@ class FingerprintTest(unittest.TestCase):
 
     def test_non_alphanumeric_alpn_fallback(self):
         self.check_response(*request(HTTP_PORT, ["/foo", "http/1.1"]))
+
+    @unittest.skipUnless(CURL_BIN, "curl is not available")
+    def test_http2_connection_prefix_cache(self):
+        url = f"https://{HOST}:{HTTP_PORT}/"
+        result = subprocess.run(
+            [CURL_BIN, "-ksSf", "--http2", url, url],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+        fingerprints = [
+            line.split(": ", 1)[1]
+            for line in result.stdout.splitlines()
+            if line.startswith("h2fp: ")
+        ]
+
+        self.assertEqual(len(fingerprints), 2)
+        self.assertTrue(all(fingerprints))
+        self.assertEqual(
+            fingerprints[0].split("|", 2)[:2],
+            fingerprints[1].split("|", 2)[:2],
+        )
 
     @unittest.skipUnless(OPENSSL_BIN, "OPENSSL_BIN is not set")
     def test_many_unknown_extensions(self):
@@ -247,6 +280,11 @@ class FingerprintTest(unittest.TestCase):
         )
         self.assertEqual(values["ja4"][6:8], "99")
         self.assertEqual(len(values["ja4"]), 36)
+        raw_extensions = {
+            int(value, 16)
+            for value in values["ja4_r"].split("_", 3)[2].split(",")
+        }
+        self.assertTrue(set(extension_types) <= raw_extensions)
 
 
 if __name__ == "__main__":
