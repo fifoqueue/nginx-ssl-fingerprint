@@ -4,7 +4,7 @@ A high performance nginx module for ja3 ja4 and http2 fingerprint.
 
 ## Patches
  - [nginx - save ja3/ja4/http2 fingerprint](patches)
- - [openssl - save clienthello data](patches)
+ - [openssl - preserve the complete ClientHello extension order](patches)
 
 ### Support Matrix
 

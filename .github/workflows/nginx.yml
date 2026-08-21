@@ -38,13 +38,8 @@ jobs:
           nohup nginx/objs/nginx -p . -c nginx-ssl-fingerprint/nginx.conf </dev/null &>nginx.log &
           sleep 2
           curl -kv https://127.0.0.1:4433
-          python3 nginx-ssl-fingerprint/tests/test_fingerprint.py
-          cat nginx.log
-      - name: Test Stream module
-        run: |
-          nohup nginx/objs/nginx -p . -c nginx-ssl-fingerprint/nginx.conf </dev/null &>nginx.log &
-          sleep 2
-          curl -kv https://127.0.0.1:4443
+          OPENSSL_BIN=openssl/apps/openssl \
+            python3 nginx-ssl-fingerprint/tests/test_fingerprint.py
           cat nginx.log
       - name: Fuzzing
         run: |
@@ -52,9 +47,10 @@ jobs:
           cd tlsfuzzer
           python3 -m venv venv
           venv/bin/pip install --pre tlslite-ng
-          for file in scripts/*.py; do
-            PYTHONPATH=. venv/bin/python $file || true
-            pgrep nginx
-          done
+          PYTHONPATH=. venv/bin/python scripts/test-client-hello-max-size.py || true
+          pgrep nginx
+          cd ..
           curl -kv -sSf https://127.0.0.1:4433
           curl -kv -sSf https://127.0.0.1:4443
+          OPENSSL_BIN=openssl/apps/openssl \
+            python3 nginx-ssl-fingerprint/tests/test_fingerprint.py

@@ -1,24 +1,21 @@
 diff --git a/src/event/ngx_event_openssl.c b/src/event/ngx_event_openssl.c
-index c6f9538..51b6b78 100644
+index c6f9538..b8b8dc6 100644
 --- a/src/event/ngx_event_openssl.c
 +++ b/src/event/ngx_event_openssl.c
-@@ -14,6 +14,7 @@
- #endif
- 
- 
-+#define NGX_SSL_JA_DATA_SIZE 256
- #define NGX_SSL_PASSWORD_BUFFER_SIZE  4096
- 
- 
-@@ -2011,6 +2012,37 @@ ngx_ssl_set_client_hello_callback(ngx_ssl_t *ssl, ngx_ssl_client_hello_arg *cb)
+@@ -2011,6 +2011,53 @@ ngx_ssl_set_client_hello_callback(ngx_ssl_t *ssl, ngx_ssl_client_hello_arg *cb)
  
  #ifdef SSL_CLIENT_HELLO_SUCCESS
  
++size_t ngx_ssl_client_hello_get_ja_data(ngx_ssl_conn_t *ssl, u_char *data,
++    size_t data_size);
++
++
 +static void
 +ngx_ssl_client_hello_ja_cb(SSL *ssl)
 +{
 +    ngx_connection_t  *c;
 +    ngx_str_t         *ja;
++    size_t             len;
 +
 +    c = ngx_ssl_get_connection(ssl);
 +
@@ -29,18 +26,29 @@ index c6f9538..51b6b78 100644
 +    c->ssl->fp_pool = c->pool;
 +
 +    ja = &c->ssl->fp_ja_data;
-+    ja->data = ngx_pnalloc(c->pool, NGX_SSL_JA_DATA_SIZE);
++    if (ja->data != NULL) {
++        return;
++    }
++
++    len = ngx_ssl_client_hello_get_ja_data(ssl, NULL, 0);
++    if (len == 0) {
++        ngx_log_error(NGX_LOG_WARN, c->log, 0,
++                      "ngx_ssl_client_hello_get_ja_data() failed");
++        return;
++    }
++
++    ja->data = ngx_pnalloc(c->pool, len);
 +    if (ja->data == NULL) {
 +        ja->len = 0;
 +        return;
 +    }
 +
-+    ja->len = SSL_client_hello_get_ja_data(ssl, ja->data,
-+                                           NGX_SSL_JA_DATA_SIZE);
-+    if (ja->len == 0) {
++    ja->len = ngx_ssl_client_hello_get_ja_data(ssl, ja->data, len);
++    if (ja->len != len) {
 +        ngx_log_error(NGX_LOG_WARN, c->log, 0,
-+                      "SSL_client_hello_get_ja_data() failed");
++                      "ngx_ssl_client_hello_get_ja_data() failed");
 +        ja->data = NULL;
++        ja->len = 0;
 +    }
 +}
 +
@@ -48,7 +56,7 @@ index c6f9538..51b6b78 100644
  int
  ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
  {
-@@ -2025,6 +2057,8 @@ ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
+@@ -2025,6 +2072,8 @@ ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
      cb = SSL_CTX_get_ex_data(c->ssl->session_ctx,
                               ngx_ssl_client_hello_arg_index);
  
