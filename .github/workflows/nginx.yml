@@ -25,6 +25,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y libpcre2-dev
+          python3 -m pip install aioquic==1.3.0 'httpx[http2]==0.28.1' h2==4.4.1
       - uses: actions/checkout@v4
         with:
           path: nginx-ssl-fingerprint
@@ -48,7 +49,25 @@ jobs:
           curl -kv https://127.0.0.1:4433
           OPENSSL_BIN=openssl/apps/openssl \
             python3 nginx-ssl-fingerprint/tests/test_fingerprint.py
+          python3 nginx-ssl-fingerprint/tests/test_quic_fingerprint.py
           cat nginx.log
+      - name: Public fingerprint compatibility
+        if: >-
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+          matrix.openssl == 'openssl-4.0.1' &&
+          matrix.nginx == 'release-1.31.4'
+        env:
+          PUBLIC_JA4_COMPAT: '1'
+          PUBLIC_HTTP2_COMPAT: '1'
+          PUBLIC_IANA_COMPAT: '1'
+          PUBLIC_PERK_COMPAT: '1'
+        run: |
+          python3 nginx-ssl-fingerprint/tests/test_quic_fingerprint.py \
+            FingerprintFormatTest.test_public_ja4_lookup \
+            FingerprintFormatTest.test_iana_quic_transport_parameter_registry \
+            FingerprintFormatTest.test_iana_http_settings_registries \
+            Http2CompatibilityTest.test_public_akamai_compatibility \
+            QuicFingerprintTest.test_public_perk_compatibility
       - name: Fuzzing
         run: |
           git clone https://github.com/tlsfuzzer/tlsfuzzer

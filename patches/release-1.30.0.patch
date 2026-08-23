@@ -1,13 +1,13 @@
 diff --git a/src/event/ngx_event_openssl.c b/src/event/ngx_event_openssl.c
-index 99ec654..3676c5b 100644
+index 99ec654..ce2241d 100644
 --- a/src/event/ngx_event_openssl.c
 +++ b/src/event/ngx_event_openssl.c
-@@ -2011,6 +2011,38 @@ ngx_ssl_set_client_hello_callback(ngx_ssl_t *ssl, ngx_ssl_client_hello_arg *cb)
+@@ -2011,6 +2011,41 @@ ngx_ssl_set_client_hello_callback(ngx_ssl_t *ssl, ngx_ssl_client_hello_arg *cb)
  
  #ifdef SSL_CLIENT_HELLO_SUCCESS
  
 +ngx_int_t ngx_ssl_client_hello_get_ja_data(ngx_ssl_conn_t *ssl,
-+    ngx_pool_t *pool, ngx_str_t *out);
++    ngx_pool_t *pool, ngx_str_t *out, uint32_t *alpn_offset);
 +
 +
 +static void
@@ -29,7 +29,10 @@ index 99ec654..3676c5b 100644
 +        return;
 +    }
 +
-+    if (ngx_ssl_client_hello_get_ja_data(ssl, c->pool, ja) != NGX_OK) {
++    if (ngx_ssl_client_hello_get_ja_data(
++            ssl, c->pool, ja, &c->ssl->fp_alpn_offset)
++        != NGX_OK)
++    {
 +        ngx_log_error(NGX_LOG_WARN, c->log, 0,
 +                      "ngx_ssl_client_hello_get_ja_data() failed");
 +        ja->data = NULL;
@@ -41,7 +44,7 @@ index 99ec654..3676c5b 100644
  int
  ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
  {
-@@ -2025,6 +2057,8 @@ ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
+@@ -2025,6 +2060,8 @@ ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
      cb = SSL_CTX_get_ex_data(c->ssl->session_ctx,
                               ngx_ssl_client_hello_arg_index);
  
@@ -51,10 +54,35 @@ index 99ec654..3676c5b 100644
                                    (const unsigned char **) &p, &len)
          == 0)
 diff --git a/src/event/ngx_event_openssl.h b/src/event/ngx_event_openssl.h
-index 79ae395..26e8f4d 100644
+index 79ae395..7a2347e 100644
 --- a/src/event/ngx_event_openssl.h
 +++ b/src/event/ngx_event_openssl.h
-@@ -149,6 +149,14 @@ struct ngx_ssl_connection_s {
+@@ -113,6 +113,24 @@ struct ngx_ssl_s {
+ };
+ 
+ 
++typedef struct {
++    ngx_str_t                   alpn_str;
++    ngx_str_t                   quic_transport_params;
++    ngx_str_t                   quic_transport_params_str;
++    ngx_str_t                   quic_transport_params_normalized_str;
++    ngx_str_t                   quic_transport_params_raw_str;
++    size_t                      quic_initial_packet_size;
++    uint32_t                    quic_version;
++    uint32_t                    quic_original_version;
++    uint8_t                     quic_dcid_length;
++    uint8_t                     quic_scid_length;
++
++    unsigned                    alpn_done:1;
++    unsigned                    quic_retry:1;
++    unsigned                    quic_version_negotiated:1;
++} ngx_ssl_fingerprint_extra_t;
++
++
+ struct ngx_ssl_connection_s {
+     ngx_ssl_conn_t             *connection;
+     SSL_CTX                    *session_ctx;
+@@ -149,6 +167,16 @@ struct ngx_ssl_connection_s {
      unsigned                    early_preread:1;
      unsigned                    write_blocked:1;
      unsigned                    sni_accepted:1;
@@ -64,13 +92,147 @@ index 79ae395..26e8f4d 100644
 +    ngx_str_t                   fp_ja3_hash;
 +    ngx_str_t                   fp_ja4_str;
 +    ngx_str_t                   fp_ja4_r_str;
++    uint32_t                    fp_alpn_offset;
 +    uint16_t                    fp_tls_greased;
 +    ngx_pool_t                 *fp_pool;
++    ngx_ssl_fingerprint_extra_t *fp_extra;
  };
  
  
+diff --git a/src/event/quic/ngx_event_quic.c b/src/event/quic/ngx_event_quic.c
+index 09ce4b8..7804492 100644
+--- a/src/event/quic/ngx_event_quic.c
++++ b/src/event/quic/ngx_event_quic.c
+@@ -11,6 +11,10 @@
+ #include <ngx_event_quic_connection.h>
+ 
+ 
++void ngx_ssl_quic_vn_record(ngx_connection_t *c, uint32_t version);
++ngx_flag_t ngx_ssl_quic_vn_match(ngx_connection_t *c, uint32_t *version);
++
++
+ static ngx_quic_connection_t *ngx_quic_new_connection(ngx_connection_t *c,
+     ngx_quic_conf_t *conf, ngx_quic_header_t *pkt);
+ static ngx_int_t ngx_quic_handle_stateless_reset(ngx_connection_t *c,
+@@ -874,6 +878,7 @@ ngx_quic_handle_packet(ngx_connection_t *c, ngx_quic_conf_t *conf,
+     /* packet does not belong to a connection */
+ 
+     if (rc == NGX_ABORT) {
++        ngx_ssl_quic_vn_record(c, pkt->version);
+         return ngx_quic_negotiate_version(c, pkt);
+     }
+ 
+@@ -960,6 +965,7 @@ ngx_quic_handle_payload(ngx_connection_t *c, ngx_quic_header_t *pkt)
+     ngx_int_t               rc;
+     ngx_quic_send_ctx_t    *ctx;
+     ngx_quic_connection_t  *qc;
++    ngx_ssl_fingerprint_extra_t  *fp;
+     static u_char           buf[NGX_QUIC_MAX_UDP_PAYLOAD_SIZE];
+ 
+     qc = ngx_quic_get_connection(c);
+@@ -1017,6 +1023,24 @@ ngx_quic_handle_payload(ngx_connection_t *c, ngx_quic_header_t *pkt)
+         }
+     }
+ 
++    if (pkt->level == NGX_QUIC_ENCRYPTION_INITIAL) {
++        fp = c->ssl->fp_extra;
++        if (fp == NULL) {
++            fp = ngx_pcalloc(c->pool, sizeof(ngx_ssl_fingerprint_extra_t));
++            c->ssl->fp_extra = fp;
++        }
++
++        if (fp != NULL && fp->quic_version == 0) {
++            fp->quic_version = pkt->version;
++            fp->quic_initial_packet_size = pkt->raw->last - pkt->data;
++            fp->quic_dcid_length = (uint8_t) pkt->dcid.len;
++            fp->quic_scid_length = (uint8_t) pkt->scid.len;
++            fp->quic_retry = pkt->retried;
++            fp->quic_version_negotiated = ngx_ssl_quic_vn_match(
++                c, &fp->quic_original_version);
++        }
++    }
++
+     if (pkt->level == NGX_QUIC_ENCRYPTION_HANDSHAKE) {
+         /*
+          * RFC 9001, 4.9.1.  Discarding Initial Keys
+diff --git a/src/event/quic/ngx_event_quic_ssl.c b/src/event/quic/ngx_event_quic_ssl.c
+index 18992ae..3c9a958 100644
+--- a/src/event/quic/ngx_event_quic_ssl.c
++++ b/src/event/quic/ngx_event_quic_ssl.c
+@@ -18,6 +18,31 @@
+ #define NGX_QUIC_MAX_BUFFERED    65535
+ 
+ 
++static ngx_inline void
++ngx_quic_save_transport_params(ngx_connection_t *c, const u_char *params,
++    size_t params_len)
++{
++    ngx_str_t  *fp;
++
++    if (c->ssl->fp_extra == NULL) {
++        return;
++    }
++
++    fp = &c->ssl->fp_extra->quic_transport_params;
++    if (fp->data != NULL || params_len == 0) {
++        return;
++    }
++
++    fp->data = ngx_pnalloc(c->pool, params_len);
++    if (fp->data == NULL) {
++        return;
++    }
++
++    ngx_memcpy(fp->data, params, params_len);
++    fp->len = params_len;
++}
++
++
+ #if (NGX_QUIC_OPENSSL_API)
+ 
+ static int ngx_quic_cbs_send(ngx_ssl_conn_t *ssl_conn,
+@@ -284,6 +309,8 @@ ngx_quic_cbs_got_transport_params(ngx_ssl_conn_t *ssl_conn,
+     p = (u_char *) params;
+     end = p + params_len;
+ 
++    ngx_quic_save_transport_params(c, p, params_len);
++
+     if (ngx_quic_parse_transport_params(p, end, &ctp, c->log) != NGX_OK) {
+         qc->error = NGX_QUIC_ERR_TRANSPORT_PARAMETER_ERROR;
+         qc->error_reason = "failed to process transport parameters";
+@@ -536,6 +563,8 @@ ngx_quic_add_handshake_data(ngx_ssl_conn_t *ssl_conn,
+         p = (u_char *) client_params;
+         end = p + client_params_len;
+ 
++        ngx_quic_save_transport_params(c, p, client_params_len);
++
+         /* defaults for parameters not sent by client */
+         ngx_memcpy(&ctp, &qc->ctp, sizeof(ngx_quic_tp_t));
+ 
+diff --git a/src/event/quic/ngx_event_quic_transport.c b/src/event/quic/ngx_event_quic_transport.c
+index ba6211c..19c23be 100644
+--- a/src/event/quic/ngx_event_quic_transport.c
++++ b/src/event/quic/ngx_event_quic_transport.c
+@@ -129,7 +129,7 @@ static size_t ngx_quic_create_retire_connection_id(u_char *p,
+ static size_t ngx_quic_create_close(u_char *p, ngx_quic_frame_t *f);
+ 
+ static ngx_int_t ngx_quic_parse_transport_param(u_char *p, u_char *end,
+-    uint16_t id, ngx_quic_tp_t *dst);
++    uint64_t id, ngx_quic_tp_t *dst);
+ 
+ 
+ uint32_t  ngx_quic_versions[] = {
+@@ -1616,7 +1616,7 @@ ngx_quic_create_max_streams(u_char *p, ngx_quic_max_streams_frame_t *ms)
+ 
+ 
+ static ngx_int_t
+-ngx_quic_parse_transport_param(u_char *p, u_char *end, uint16_t id,
++ngx_quic_parse_transport_param(u_char *p, u_char *end, uint64_t id,
+     ngx_quic_tp_t *dst)
+ {
+     uint64_t   varint;
 diff --git a/src/http/v2/ngx_http_v2.c b/src/http/v2/ngx_http_v2.c
-index efe2290..0e88a71 100644
+index efe2290..acbd502 100644
 --- a/src/http/v2/ngx_http_v2.c
 +++ b/src/http/v2/ngx_http_v2.c
 @@ -1342,6 +1342,14 @@ ngx_http_v2_state_headers(ngx_http_v2_connection_t *h2c, u_char *pos,
@@ -88,12 +250,13 @@ index efe2290..0e88a71 100644
      clcf = ngx_http_get_module_loc_conf(h2c->http_connection->conf_ctx,
                                          ngx_http_core_module);
  
-@@ -1781,6 +1789,15 @@ ngx_http_v2_state_process_header(ngx_http_v2_connection_t *h2c, u_char *pos,
+@@ -1781,6 +1789,16 @@ ngx_http_v2_state_process_header(ngx_http_v2_connection_t *h2c, u_char *pos,
      }
  
      if (header->name.data[0] == ':') {
 +        if (h2c->state.stream
-+            && h2c->state.stream->fp_pseudoheaders_len < 4
++            && h2c->state.stream->fp_pseudoheaders_len
++               < sizeof(h2c->state.stream->fp_pseudoheaders)
 +            && header->name.len > 1)
 +        {
 +            h2c->state.stream->fp_pseudoheaders[
@@ -104,22 +267,53 @@ index efe2290..0e88a71 100644
          rc = ngx_http_v2_pseudo_header(r, header);
  
          if (rc == NGX_OK) {
-@@ -2209,6 +2226,14 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
+@@ -2190,8 +2208,9 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
+     u_char *end)
+ {
+     ssize_t                   window_delta;
+-    ngx_uint_t                id, value;
+-    ngx_http_v2_out_frame_t  *frame;
++    ngx_uint_t                   id, value;
++    ngx_http_v2_fp_setting_t    *setting;
++    ngx_http_v2_out_frame_t     *frame;
+ 
+     window_delta = 0;
+ 
+@@ -2209,6 +2228,33 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
          ngx_log_debug2(NGX_LOG_DEBUG_HTTP, h2c->connection->log, 0,
                         "http2 setting %ui:%ui", id, value);
  
-+        if (h2c->fp_prefix.data == NULL
-+            && h2c->fp_settings.len < NGX_FP_V2_SETTINGS_MAX)
-+        {
-+            h2c->fp_settings.ids[h2c->fp_settings.len] = (uint16_t) id;
-+            h2c->fp_settings.values[h2c->fp_settings.len] = (uint32_t) value;
++        if (h2c->fp_prefix.data == NULL) {
++            if (h2c->fp_settings.len < NGX_FP_V2_SETTINGS_INLINE) {
++                setting = &h2c->fp_settings.items[h2c->fp_settings.len];
++
++            } else {
++                if (h2c->fp_settings.overflow == NULL) {
++                    h2c->fp_settings.overflow = ngx_array_create(
++                        h2c->connection->pool, 4,
++                        sizeof(ngx_http_v2_fp_setting_t));
++                }
++                if (h2c->fp_settings.overflow == NULL) {
++                    return ngx_http_v2_connection_error(
++                        h2c, NGX_HTTP_V2_INTERNAL_ERROR);
++                }
++
++                setting = ngx_array_push(h2c->fp_settings.overflow);
++                if (setting == NULL) {
++                    return ngx_http_v2_connection_error(
++                        h2c, NGX_HTTP_V2_INTERNAL_ERROR);
++                }
++            }
++
++            setting->id = (uint16_t) id;
++            setting->value = (uint32_t) value;
 +            h2c->fp_settings.len++;
 +        }
 +
          switch (id) {
  
          case NGX_HTTP_V2_INIT_WINDOW_SIZE_SETTING:
-@@ -2493,6 +2518,9 @@ ngx_http_v2_state_window_update(ngx_http_v2_connection_t *h2c, u_char *pos,
+@@ -2493,6 +2539,9 @@ ngx_http_v2_state_window_update(ngx_http_v2_connection_t *h2c, u_char *pos,
      }
  
      h2c->send_window += window;
@@ -130,33 +324,39 @@ index efe2290..0e88a71 100644
      while (!ngx_queue_empty(&h2c->waiting)) {
          q = ngx_queue_head(&h2c->waiting);
 diff --git a/src/http/v2/ngx_http_v2.h b/src/http/v2/ngx_http_v2.h
-index 9605c8a..521e68b 100644
+index 9605c8a..04c660f 100644
 --- a/src/http/v2/ngx_http_v2.h
 +++ b/src/http/v2/ngx_http_v2.h
 @@ -17,6 +17,8 @@
  
  #define NGX_HTTP_V2_STATE_BUFFER_SIZE    16
  
-+#define NGX_FP_V2_SETTINGS_MAX           8
++#define NGX_FP_V2_SETTINGS_INLINE        8
 +
  #define NGX_HTTP_V2_DEFAULT_FRAME_SIZE   (1 << 14)
  #define NGX_HTTP_V2_MAX_FRAME_SIZE       ((1 << 24) - 1)
  
-@@ -121,6 +123,13 @@ typedef struct {
+@@ -121,6 +123,19 @@ typedef struct {
  } ngx_http_v2_hpack_t;
  
  
 +typedef struct {
-+    uint16_t    ids[NGX_FP_V2_SETTINGS_MAX];
-+    uint32_t    values[NGX_FP_V2_SETTINGS_MAX];
-+    ngx_uint_t  len;
++    uint16_t    id;
++    uint32_t    value;
++} ngx_http_v2_fp_setting_t;
++
++
++typedef struct {
++    ngx_http_v2_fp_setting_t  items[NGX_FP_V2_SETTINGS_INLINE];
++    ngx_array_t              *overflow;
++    ngx_uint_t                len;
 +} ngx_http_v2_fp_settings_t;
 +
 +
  struct ngx_http_v2_connection_s {
      ngx_connection_t                *connection;
      ngx_http_connection_t           *http_connection;
-@@ -168,6 +177,10 @@ struct ngx_http_v2_connection_s {
+@@ -168,6 +183,10 @@ struct ngx_http_v2_connection_s {
      unsigned                         table_update:1;
      unsigned                         blocked:1;
      unsigned                         goaway:1;
@@ -167,7 +367,7 @@ index 9605c8a..521e68b 100644
  };
  
  
-@@ -222,6 +235,14 @@ struct ngx_http_v2_stream_s {
+@@ -222,6 +241,14 @@ struct ngx_http_v2_stream_s {
      unsigned                         rst_sent:1;
      unsigned                         no_flow_control:1;
      unsigned                         skip_data:1;
@@ -177,8 +377,173 @@ index 9605c8a..521e68b 100644
 +    uint8_t                          fp_priority_excl;
 +    uint8_t                          fp_priority_weight;
 +    unsigned                         fp_priority_set:1;
-+    u_char                           fp_pseudoheaders[4];
++    u_char                           fp_pseudoheaders[8];
 +    uint8_t                          fp_pseudoheaders_len;
  };
  
+ 
+diff --git a/src/http/v3/ngx_http_v3.h b/src/http/v3/ngx_http_v3.h
+index 8fd212c..6e21e40 100644
+--- a/src/http/v3/ngx_http_v3.h
++++ b/src/http/v3/ngx_http_v3.h
+@@ -53,6 +53,7 @@
+ #define NGX_HTTP_V3_STREAM_SERVER_DECODER          5
+ #define NGX_HTTP_V3_MAX_KNOWN_STREAM               6
+ #define NGX_HTTP_V3_MAX_UNI_STREAMS                3
++#define NGX_HTTP_V3_FP_SETTINGS_INLINE             8
+ 
+ /* HTTP/3 errors */
+ #define NGX_HTTP_V3_ERR_NO_ERROR                   0x100
+@@ -112,6 +113,19 @@ typedef struct {
+ } ngx_http_v3_srv_conf_t;
+ 
+ 
++typedef struct {
++    uint64_t                      id;
++    uint64_t                      value;
++} ngx_http_v3_fp_setting_t;
++
++
++typedef struct {
++    ngx_http_v3_fp_setting_t      items[NGX_HTTP_V3_FP_SETTINGS_INLINE];
++    ngx_array_t                  *overflow;
++    ngx_uint_t                    len;
++} ngx_http_v3_fp_settings_t;
++
++
+ struct ngx_http_v3_parse_s {
+     size_t                        header_limit;
+     ngx_http_v3_parse_headers_t   headers;
+@@ -131,6 +145,13 @@ struct ngx_http_v3_session_s {
+     ngx_queue_t                   blocked;
+     ngx_uint_t                    nblocked;
+ 
++    ngx_http_v3_fp_settings_t     fp_settings;
++    uint64_t                      fp_qpack_capacity;
++    uint64_t                      fp_qpack_blocked;
++    ngx_str_t                     fp_settings_str;
++    ngx_str_t                     fp_qpack_str;
++    unsigned                      fp_settings_done:1;
++
+     uint64_t                      next_request_id;
+ 
+     off_t                         total_bytes;
+diff --git a/src/http/v3/ngx_http_v3_parse.c b/src/http/v3/ngx_http_v3_parse.c
+index bcbf0db..57648c2 100644
+--- a/src/http/v3/ngx_http_v3_parse.c
++++ b/src/http/v3/ngx_http_v3_parse.c
+@@ -1163,8 +1163,9 @@ static ngx_int_t
+ ngx_http_v3_parse_control(ngx_connection_t *c, ngx_http_v3_parse_control_t *st,
+     ngx_buf_t *b)
+ {
+-    ngx_buf_t  loc;
+-    ngx_int_t  rc;
++    ngx_buf_t              loc;
++    ngx_int_t              rc;
++    ngx_http_v3_session_t  *h3c;
+     enum {
+         sw_start = 0,
+         sw_first_type,
+@@ -1239,6 +1240,10 @@ ngx_http_v3_parse_control(ngx_connection_t *c, ngx_http_v3_parse_control_t *st,
+ 
+             st->length = st->vlint.value;
+             if (st->length == 0) {
++                if (st->type == NGX_HTTP_V3_FRAME_SETTINGS) {
++                    h3c = ngx_http_v3_get_session(c);
++                    h3c->fp_settings_done = 1;
++                }
+                 st->state = sw_type;
+                 break;
+             }
+@@ -1274,6 +1279,8 @@ ngx_http_v3_parse_control(ngx_connection_t *c, ngx_http_v3_parse_control_t *st,
+             }
+ 
+             if (st->length == 0) {
++                h3c = ngx_http_v3_get_session(c);
++                h3c->fp_settings_done = 1;
+                 st->state = sw_type;
+             }
+ 
+@@ -1297,7 +1304,9 @@ static ngx_int_t
+ ngx_http_v3_parse_settings(ngx_connection_t *c,
+     ngx_http_v3_parse_settings_t *st, ngx_buf_t *b)
+ {
+-    ngx_int_t  rc;
++    ngx_int_t                    rc;
++    ngx_http_v3_fp_setting_t    *setting;
++    ngx_http_v3_session_t       *h3c;
+     enum {
+         sw_start = 0,
+         sw_id,
+@@ -1339,6 +1348,35 @@ ngx_http_v3_parse_settings(ngx_connection_t *c,
+                 return NGX_HTTP_V3_ERR_SETTINGS_ERROR;
+             }
+ 
++            h3c = ngx_http_v3_get_session(c);
++            if (st->id == NGX_HTTP_V3_PARAM_MAX_TABLE_CAPACITY) {
++                h3c->fp_qpack_capacity = st->vlint.value;
++            } else if (st->id == NGX_HTTP_V3_PARAM_BLOCKED_STREAMS) {
++                h3c->fp_qpack_blocked = st->vlint.value;
++            }
++
++            if (h3c->fp_settings.len < NGX_HTTP_V3_FP_SETTINGS_INLINE) {
++                setting = &h3c->fp_settings.items[h3c->fp_settings.len];
++
++            } else {
++                if (h3c->fp_settings.overflow == NULL) {
++                    h3c->fp_settings.overflow = ngx_array_create(
++                        c->pool, 4, sizeof(ngx_http_v3_fp_setting_t));
++                }
++                if (h3c->fp_settings.overflow == NULL) {
++                    return NGX_ERROR;
++                }
++
++                setting = ngx_array_push(h3c->fp_settings.overflow);
++                if (setting == NULL) {
++                    return NGX_ERROR;
++                }
++            }
++
++            setting->id = st->id;
++            setting->value = st->vlint.value;
++            h3c->fp_settings.len++;
++
+             goto done;
+         }
+     }
+diff --git a/src/http/v3/ngx_http_v3_parse.h b/src/http/v3/ngx_http_v3_parse.h
+index ba004db..6855db4 100644
+--- a/src/http/v3/ngx_http_v3_parse.h
++++ b/src/http/v3/ngx_http_v3_parse.h
+@@ -81,6 +81,12 @@ typedef struct {
+     ngx_http_v3_parse_varlen_int_t  vlint;
+     ngx_http_v3_parse_field_section_prefix_t  prefix;
+     ngx_http_v3_parse_field_rep_t   field_rep;
++    ngx_str_t                       fp_fingerprint;
++    ngx_str_t                       fp_fingerprint_hash;
++    ngx_str_t                       fp_fingerprint_normalized;
++    ngx_str_t                       fp_fingerprint_hash_normalized;
++    u_char                          fp_pseudoheaders[8];
++    uint8_t                         fp_pseudoheaders_len;
+ } ngx_http_v3_parse_headers_t;
+ 
+ 
+diff --git a/src/http/v3/ngx_http_v3_request.c b/src/http/v3/ngx_http_v3_request.c
+index 7bb6131..c9b9fb6 100644
+--- a/src/http/v3/ngx_http_v3_request.c
++++ b/src/http/v3/ngx_http_v3_request.c
+@@ -649,6 +649,14 @@ ngx_http_v3_process_header(ngx_http_request_t *r, ngx_str_t *name,
+     }
+ 
+     if (name->len && name->data[0] == ':') {
++        if (r->v3_parse->headers.fp_pseudoheaders_len
++            < sizeof(r->v3_parse->headers.fp_pseudoheaders)
++            && name->len > 1)
++        {
++            r->v3_parse->headers.fp_pseudoheaders[
++                r->v3_parse->headers.fp_pseudoheaders_len++
++            ] = name->data[1];
++        }
+         return ngx_http_v3_process_pseudo_header(r, name, value);
+     }
  

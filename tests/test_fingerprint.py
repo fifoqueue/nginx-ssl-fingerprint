@@ -6,12 +6,33 @@ import ssl
 import subprocess
 import unittest
 
+try:
+    from h2.config import H2Configuration
+    from h2.connection import H2Connection
+    from h2.events import DataReceived, StreamEnded
+except ImportError:
+    H2Connection = None
+
 
 HOST = os.getenv("NGINX_HOST", "127.0.0.1")
 HTTP_PORT = int(os.getenv("NGINX_HTTP_PORT", "4433"))
 STREAM_PORT = int(os.getenv("NGINX_STREAM_PORT", "4443"))
 OPENSSL_BIN = os.getenv("OPENSSL_BIN")
 CURL_BIN = os.getenv("CURL_BIN") or shutil.which("curl")
+
+# FoxIO JA4 fixture: pcap/quic-tls-handshake.pcapng, client CRYPTO stream.
+OFFICIAL_QUIC_CLIENT_HELLO = bytes.fromhex(
+    "010001250303383d3bcc378f2dad654f7b937409876967b41befe42ba1acdebb"
+    "8b9445787b84000006130113021303010000f6002d00020101001b0003020002"
+    "446900050003026833000d001400120403080404010503080505010806060102"
+    "01002b000302030400000013001100000e7777772e676f6f676c652e636f6d"
+    "000a00080006001d0017001800390067040480f000000f000604806000000302"
+    "45c0050480600000712702502480ff73db0c00000001aada0a7a000000010802"
+    "40647128045256434d07048060000020048001000009024067d71be2ff92c99e"
+    "fc060efac8e782f2800047520400000001010480007530001000050003026833"
+    "003300260024001d00201dab42d2c5adfce8c137239e8de6b042bbd706b97af5"
+    "dc7331dae4b80d1c5937"
+)
 
 
 def is_grease(value):
@@ -55,7 +76,35 @@ def parse_client_hello(data):
     return version, ciphers, extensions
 
 
-def fingerprints(client_hello):
+def offered_alpn(client_hello):
+    _, _, extensions = parse_client_hello(client_hello)
+    extension_data = dict(extensions)
+    data = extension_data.get(16, b"")
+    if len(data) < 3 or int.from_bytes(data[:2]) != len(data) - 2:
+        return ""
+
+    protocols = []
+    pos = 2
+    while pos < len(data):
+        length = data[pos]
+        pos += 1
+        if not length or pos + length > len(data):
+            raise ValueError("invalid ALPN extension")
+        protocol = data[pos : pos + length]
+        protocols.append(
+            "".join(
+                chr(value)
+                if 0x21 <= value <= 0x7E and value not in (ord("%"), ord(","))
+                else f"%{value:02x}"
+                for value in protocol
+            )
+        )
+        pos += length
+
+    return ",".join(protocols)
+
+
+def fingerprints(client_hello, transport="t"):
     version, ciphers, extensions = parse_client_hello(client_hello)
     extension_types = [ext_type for ext_type, _ in extensions]
     extension_data = dict(extensions)
@@ -143,7 +192,7 @@ def fingerprints(client_hello):
     )
 
     ja4_a = (
-        f"t{ja4_version}{'d' if 0 in extension_types else 'i'}"
+        f"{transport}{ja4_version}{'d' if 0 in extension_types else 'i'}"
         f"{min(len(clean_ciphers), 99):02d}"
         f"{min(len(clean_extensions), 99):02d}{alpn}"
     )
@@ -196,7 +245,78 @@ def request(port, alpn_protocols=None):
     return b"".join(chunks).decode(), client_hellos[0]
 
 
+def request_many_http2_settings():
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.set_alpn_protocols(["h2"])
+
+    with socket.create_connection((HOST, HTTP_PORT), timeout=5) as raw:
+        with context.wrap_socket(raw, server_hostname=HOST) as connection:
+            h2 = H2Connection(H2Configuration(client_side=True))
+            h2.initiate_connection()
+            preface = h2.data_to_send()
+
+            # Track a second SETTINGS ACK in hyper-h2, but send 300 entries.
+            h2.update_settings({0x10: 0})
+            h2.data_to_send()
+            payload = b"".join(
+                (0x1000 + index).to_bytes(2, "big")
+                + index.to_bytes(4, "big")
+                for index in range(300)
+            )
+            settings_frame = (
+                len(payload).to_bytes(3, "big")
+                + b"\x04\x00\x00\x00\x00\x00"
+                + payload
+            )
+
+            stream_id = h2.get_next_available_stream_id()
+            h2.send_headers(
+                stream_id,
+                [
+                    (":method", "GET"),
+                    (":authority", f"{HOST}:{HTTP_PORT}"),
+                    (":scheme", "https"),
+                    (":path", "/"),
+                ],
+                end_stream=True,
+            )
+            connection.sendall(preface + settings_frame + h2.data_to_send())
+
+            body = bytearray()
+            complete = False
+            while not complete:
+                data = connection.recv(65535)
+                if not data:
+                    raise ConnectionError("HTTP/2 response ended early")
+                for event in h2.receive_data(data):
+                    if isinstance(event, DataReceived):
+                        body.extend(event.data)
+                        h2.acknowledge_received_data(
+                            event.flow_controlled_length,
+                            event.stream_id,
+                        )
+                    elif isinstance(event, StreamEnded):
+                        complete = True
+                pending = h2.data_to_send()
+                if pending:
+                    connection.sendall(pending)
+
+    return body.decode()
+
+
 class FingerprintTest(unittest.TestCase):
+    def test_official_quic_ja4_fixture(self):
+        _, _, ja4, ja4_r, _ = fingerprints(
+            OFFICIAL_QUIC_CLIENT_HELLO, transport="q"
+        )
+        self.assertEqual(
+            ja4,
+            "q13d0310h3_55b375c5d22e_cd85d2d88918",
+        )
+        self.assertTrue(ja4_r.startswith("q13d0310h3_1301,1302,1303_"))
+
     def check_response(self, response, client_hello):
         values = dict(
             line.split(": ", 1)
@@ -210,6 +330,7 @@ class FingerprintTest(unittest.TestCase):
         self.assertEqual(values["ja4"], ja4)
         self.assertEqual(values["ja4_r"], ja4_r)
         self.assertEqual(values["greased"], greased)
+        self.assertEqual(values["alpn"], offered_alpn(client_hello))
 
     def test_http(self):
         self.check_response(*request(HTTP_PORT))
@@ -223,6 +344,9 @@ class FingerprintTest(unittest.TestCase):
 
     def test_non_alphanumeric_alpn_fallback(self):
         self.check_response(*request(HTTP_PORT, ["/foo", "http/1.1"]))
+
+    def test_alpn_escaping(self):
+        self.check_response(*request(HTTP_PORT, ["a,b", "x%y", "http/1.1"]))
 
     @unittest.skipUnless(CURL_BIN, "curl is not available")
     def test_http2_connection_prefix_cache(self):
@@ -242,10 +366,35 @@ class FingerprintTest(unittest.TestCase):
 
         self.assertEqual(len(fingerprints), 2)
         self.assertTrue(all(fingerprints))
+        for fingerprint in fingerprints:
+            settings, window_update, priority, pseudo_headers = (
+                fingerprint.split("|")
+            )
+            self.assertRegex(settings, r"^\d+:\d+(?:;\d+:\d+)*$")
+            self.assertRegex(window_update, r"^\d+$")
+            self.assertRegex(
+                priority,
+                r"^(?:0|\d+:[01]:\d+:\d+)$",
+            )
+            self.assertRegex(pseudo_headers, r"^[masp](?:,[masp]){3}$")
         self.assertEqual(
             fingerprints[0].split("|", 2)[:2],
             fingerprints[1].split("|", 2)[:2],
         )
+
+    @unittest.skipUnless(H2Connection, "hyper-h2 is not installed")
+    def test_many_http2_settings(self):
+        response = request_many_http2_settings()
+        values = dict(
+            line.split(": ", 1)
+            for line in response.splitlines()
+            if ": " in line
+        )
+        settings = values["h2fp"].split("|", 1)[0]
+        self.assertNotIn("TRUNCATED", settings)
+        self.assertEqual(len(settings.split(";")), 307)
+        self.assertRegex(settings, r"(?:^|;)4096:0(?:;|$)")
+        self.assertRegex(settings, r"(?:^|;)4395:299(?:;|$)")
 
     @unittest.skipUnless(OPENSSL_BIN, "OPENSSL_BIN is not set")
     def test_many_unknown_extensions(self):
