@@ -48,11 +48,11 @@ A high performance nginx module for JA3, JA4, HTTP/2, QUIC, and HTTP/3 fingerpri
 
 JA4 follows the [FoxIO JA4 specification][ja4], including the `q` transport prefix for QUIC. `http_ssl_alpn` contains every protocol offered by the client; unsafe bytes are percent-encoded.
 
-`quic_transport_parameters` preserves wire order. Standard integer values are rendered in decimal, opaque values in lowercase hex, QUIC GREASE parameters as `GREASE`, and the random `initial_source_connection_id` value is blanked. `quic_transport_parameters_normalized` sorts numeric IDs and places GREASE last, matching the normalized Perk form. Use `quic_transport_parameters_raw` when the exact RFC 9000 wire bytes are needed. Known integer decoding follows the current [IANA QUIC registry][iana-quic]; unrecognized values remain lossless lowercase hex.
+`quic_transport_parameters` preserves wire order. Standard integer values are rendered in decimal, opaque values in lowercase hex, QUIC GREASE parameters as `GREASE`, and the random `initial_source_connection_id` value as `AUTO`. `quic_transport_parameters_normalized` sorts numeric IDs and places GREASE last, matching the normalized Perk form. Use `quic_transport_parameters_raw` when the exact RFC 9000 wire bytes are needed. Known integer decoding follows the current [IANA QUIC registry][iana-quic]; unrecognized values remain lossless lowercase hex.
 
-`http3_fingerprint` and `http3_perk` use the currently deployed [Perk-style layout][perk]: `SETTINGS|pseudo-header-order|transport-parameters`. The normalized aliases use the same SETTINGS and pseudo-header order with sorted transport parameters. HTTP/3 and QUIC do not yet have a single JA4-equivalent standard covering all these fields, so the raw variables remain the stable interface. SETTINGS order and values are preserved without a fixed entry cutoff.
+`http3_fingerprint` and `http3_perk` use the currently deployed [Perk-style layout][perk]: `SETTINGS|pseudo-header-order|transport-parameters|DCID-length,SCID-length`. The normalized aliases use the same SETTINGS, pseudo-header order, and CID lengths with sorted transport parameters. HTTP/3 and QUIC do not yet have a single JA4-equivalent standard covering all these fields, so the raw variables remain the stable interface. SETTINGS order and values are preserved without a fixed entry cutoff.
 
-Retry detection is exact after nginx validates the returned token. In a Retry flow, `quic_initial_packet_size` and the CID lengths describe the accepted post-Retry Initial. Version Negotiation spans two QUIC connections, so it is correlated heuristically by listener and client UDP endpoint for five seconds using a dynamically growing per-worker hash table.
+Retry detection is exact after nginx validates the returned token. In a Retry flow, `quic_initial_packet_size` describes the accepted post-Retry Initial while `quic_dcid_length` is restored from the original client Initial. Version Negotiation spans two QUIC connections, so it is correlated heuristically by listener and client UDP endpoint for five seconds using a dynamically growing per-worker hash table.
 
 The listed nginx releases currently accept QUIC v1. The variable encoding is version-agnostic and Version Negotiation records the attempted version, but this module does not add QUIC v2 protocol support to nginx itself.
 
@@ -79,17 +79,17 @@ quic_version=00000001
 quic_initial_packet_size=1200
 quic_dcid_length=8
 quic_scid_length=8
-quic_transport_parameters=15:;1:30000
-quic_transport_parameters_normalized=1:30000;15:
+quic_transport_parameters=15:AUTO;1:30000
+quic_transport_parameters_normalized=1:30000;15:AUTO
 quic_transport_parameters_raw=0f00010480007530
 quic_retry=1
 quic_version_negotiation=1a2a3a4a>00000001
 http3_settings=1:65536;6:262144;7:100;51:1;GREASE
 http3_qpack=65536:100
-http3_perk=1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|15:;1:30000
-http3_perk_hash=53e4a8eb67b958c267f15f48d94f43f4
-http3_perk_normalized=1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|1:30000;15:
-http3_perk_hash_normalized=45891705d5f76599c11d7cfcb479984f
+http3_perk=1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|15:AUTO;1:30000|8,8
+http3_perk_hash=3bfe1d06b25e25d77abb81225ba226cc
+http3_perk_normalized=1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|1:30000;15:AUTO|8,8
+http3_perk_hash_normalized=27b75a2b74b1b708fa9897ec38668823
 ```
 
 #### Example

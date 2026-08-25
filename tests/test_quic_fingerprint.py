@@ -35,18 +35,18 @@ HTTP3_PORT = int(os.getenv("NGINX_HTTP3_PORT", "4434"))
 RESERVED_VERSION = 0x1A2A3A4A
 PUBLIC_PERK_TEXT = (
     "1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|"
-    "12584:4f524947;3:1472;6:6291456;12583:AUTO;32:65536;15:;"
+    "12584:4f524947;3:1472;6:6291456;12583:AUTO;32:65536;15:AUTO;"
     "4:15728640;9:103;5:6291456;GREASE;7:6291456;"
-    "17:1@1,GREASE;8:100;1:30000"
+    "17:1@1,GREASE;8:100;1:30000|8,8"
 )
-PUBLIC_PERK_HASH = "1f49997bcd1d1ad4540e50056999527c"
+PUBLIC_PERK_HASH = "f7f79aaf69525a145a42a6df4d887352"
 PUBLIC_PERK_TEXT_NORMALIZED = (
     "1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|"
     "1:30000;3:1472;4:15728640;5:6291456;6:6291456;7:6291456;"
-    "8:100;9:103;15:;17:1@1,GREASE;32:65536;12583:AUTO;"
-    "12584:4f524947;GREASE"
+    "8:100;9:103;15:AUTO;17:1@1,GREASE;32:65536;12583:AUTO;"
+    "12584:4f524947;GREASE|8,8"
 )
-PUBLIC_PERK_HASH_NORMALIZED = "94776d419fc3a7164f0ca93712bb9bd5"
+PUBLIC_PERK_HASH_NORMALIZED = "60ccba88dad18dd4bc5c171d7a9d6df8"
 PUBLIC_QUIC_JA4 = "q13d0312h3_55b375c5d22e_06cda9e17597"
 PUBLIC_HTTPX_AKAMAI = (
     "1:4096;2:0;4:65535;5:16384;3:100;6:65536|"
@@ -63,8 +63,17 @@ IANA_HTTP2_SETTINGS = {1, 2, 3, 4, 5, 6, 8, 9, 0x10, 0x4D44}
 IANA_HTTP3_SETTINGS = {1, 6, 7, 8, 0x33, 0x4D44}
 
 
-def perk_text(settings, pseudo_headers, transport_parameters):
-    return f"{settings}|{','.join(pseudo_headers)}|{transport_parameters}"
+def perk_text(
+    settings,
+    pseudo_headers,
+    transport_parameters,
+    dcid_length,
+    scid_length,
+):
+    return (
+        f"{settings}|{','.join(pseudo_headers)}|{transport_parameters}|"
+        f"{dcid_length},{scid_length}"
+    )
 
 
 class Http3Client(QuicConnectionProtocol):
@@ -219,19 +228,29 @@ class FingerprintFormatTest(unittest.TestCase):
         )
 
     def test_public_perk_fixture(self):
-        settings, pseudo_headers, transport_parameters = PUBLIC_PERK_TEXT.split(
-            "|", 2
+        settings, pseudo_headers, transport_parameters, cid_lengths = (
+            PUBLIC_PERK_TEXT.split("|", 3)
         )
         self.assertEqual(
-            perk_text(settings, pseudo_headers.split(","), transport_parameters),
+            perk_text(
+                settings,
+                pseudo_headers.split(","),
+                transport_parameters,
+                *cid_lengths.split(","),
+            ),
             PUBLIC_PERK_TEXT,
         )
         self.assertEqual(
             hashlib.md5(PUBLIC_PERK_TEXT.encode()).hexdigest(),
             PUBLIC_PERK_HASH,
         )
-        normalized_settings, normalized_pseudo, normalized_parameters = (
-            PUBLIC_PERK_TEXT_NORMALIZED.split("|", 2)
+        (
+            normalized_settings,
+            normalized_pseudo,
+            normalized_parameters,
+            normalized_cid_lengths,
+        ) = (
+            PUBLIC_PERK_TEXT_NORMALIZED.split("|", 3)
         )
         self.assertEqual(normalized_settings, settings)
         self.assertEqual(normalized_pseudo, pseudo_headers)
@@ -240,6 +259,7 @@ class FingerprintFormatTest(unittest.TestCase):
                 normalized_settings,
                 normalized_pseudo.split(","),
                 normalized_parameters,
+                *normalized_cid_lengths.split(","),
             ),
             PUBLIC_PERK_TEXT_NORMALIZED,
         )
@@ -412,11 +432,15 @@ class QuicFingerprintTest(unittest.TestCase):
         self.assertGreater(int(values["quic_dcid_len"]), 0)
         self.assertGreater(int(values["quic_scid_len"]), 0)
         self.assertTrue(values["quic_tp"])
-        self.assertRegex(values["quic_tp"], r"(?:^|;)15:(?:;|$)")
+        self.assertRegex(values["quic_tp"], r"(?:^|;)15:AUTO(?:;|$)")
         self.assertRegex(values["quic_tp"], r"(?:^|;)62:7(?:;|$)")
         self.assertRegex(values["quic_tp"], r"(?:^|;)65537:ff(?:;|$)")
         self.assertRegex(values["quic_tp"], r"(?:^|;)12583:AUTO(?:;|$)")
         self.assertTrue(values["quic_tp_normalized"])
+        self.assertRegex(
+            values["quic_tp_normalized"],
+            r"(?:^|;)15:AUTO(?:;|$)",
+        )
         self.assertRegex(
             values["quic_tp_normalized"],
             r"(?:^|;)62:7(?:;|$)",
@@ -455,6 +479,8 @@ class QuicFingerprintTest(unittest.TestCase):
                 values["h3_settings"],
                 ["m", "a", "s", "p"],
                 values["quic_tp"],
+                values["quic_dcid_len"],
+                values["quic_scid_len"],
             ),
         )
         self.assertEqual(
@@ -469,6 +495,8 @@ class QuicFingerprintTest(unittest.TestCase):
                 values["h3_settings"],
                 ["m", "a", "s", "p"],
                 values["quic_tp_normalized"],
+                values["quic_dcid_len"],
+                values["quic_scid_len"],
             ),
         )
         self.assertEqual(

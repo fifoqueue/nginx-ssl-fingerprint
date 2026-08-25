@@ -144,7 +144,7 @@ index 09ce4b8..7804492 100644
 +        if (fp != NULL && fp->quic_version == 0) {
 +            fp->quic_version = pkt->version;
 +            fp->quic_initial_packet_size = pkt->raw->last - pkt->data;
-+            fp->quic_dcid_length = (uint8_t) pkt->dcid.len;
++            fp->quic_dcid_length = (uint8_t) pkt->odcid.len;
 +            fp->quic_scid_length = (uint8_t) pkt->scid.len;
 +            fp->quic_retry = pkt->retried;
 +            fp->quic_version_negotiated = ngx_ssl_quic_vn_match(

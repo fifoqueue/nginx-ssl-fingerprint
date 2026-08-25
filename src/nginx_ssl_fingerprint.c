@@ -512,9 +512,9 @@ append_quic_transport_param_value(u_char *p, ngx_ssl_quic_tp_t *tp)
     uint32_t       version;
     uint64_t       value;
 
-    /* initial_source_connection_id is random per connection. */
+    /* Perk redacts the random initial_source_connection_id. */
     if (tp->id == 0x0f) {
-        return p;
+        return ngx_cpymem(p, "AUTO", sizeof("AUTO") - 1);
     }
 
     if ((tp->id == 0x11 || tp->id == 0xff73db)
@@ -2009,8 +2009,14 @@ ngx_http3_fingerprint_create(ngx_http_request_t *r, ngx_str_t *out,
     size_t                        i, n;
     ngx_str_t                     settings, transport_params, *cached;
     ngx_http_v3_parse_headers_t  *headers;
+    ngx_ssl_fingerprint_extra_t  *fp;
 
     if (r->connection->quic == NULL || r->v3_parse == NULL) {
+        return NGX_DECLINED;
+    }
+
+    fp = r->connection->ssl->fp_extra;
+    if (fp == NULL) {
         return NGX_DECLINED;
     }
 
@@ -2039,7 +2045,7 @@ ngx_http3_fingerprint_create(ngx_http_request_t *r, ngx_str_t *out,
         return NGX_DECLINED;
     }
 
-    n = settings.len + transport_params.len + 2
+    n = settings.len + transport_params.len + 10
         + headers->fp_pseudoheaders_len * 2;
     cached->data = ngx_pnalloc(r->pool, n);
     if (cached->data == NULL) {
@@ -2056,6 +2062,10 @@ ngx_http3_fingerprint_create(ngx_http_request_t *r, ngx_str_t *out,
     }
     *p++ = '|';
     p = ngx_cpymem(p, transport_params.data, transport_params.len);
+    *p++ = '|';
+    p = append_uint64(p, fp->quic_dcid_length);
+    *p++ = ',';
+    p = append_uint64(p, fp->quic_scid_length);
 
     cached->len = p - cached->data;
     *out = *cached;
