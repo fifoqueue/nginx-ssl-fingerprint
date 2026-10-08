@@ -1,0 +1,15 @@
+JA4+ fingerprinting
+
+JA4H, JA4X, JA4T, and JA4L algorithms, HTTP method and language handling, cookie ordering, TCP SYN parsing, and the TCP_SAVE_SYN nginx patch are based on FoxIO's JA4 and ja4-nginx-module projects:
+
+https://github.com/FoxIO-LLC/ja4
+https://github.com/FoxIO-LLC/ja4-nginx-module
+
+Copyright (c) 2023-2026, FoxIO, LLC. All rights reserved. Patent pending.
+JA4 and JA4+ are trademarks of FoxIO.
+These JA4+ portions are subject to FoxIO License 1.1 (LICENSE-JA4PLUS).
+The original module's BSD license remains in LICENSE.
+
+Reference revisions:
+FoxIO-LLC/ja4: c6469a7b0dbf8fe963810162429fbfd9d1acc4d5
+FoxIO-LLC/ja4-nginx-module: ca31515e1350a983ace28d3e7453a1f01e6ab28b

@@ -1,10 +1,16 @@
+import datetime
 import hashlib
 import os
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
+import sys
+import tempfile
+import threading
 import unittest
+from decimal import Decimal, ROUND_HALF_UP
 
 try:
     from h2.config import H2Configuration
@@ -16,6 +22,7 @@ except ImportError:
 
 HOST = os.getenv("NGINX_HOST", "127.0.0.1")
 HTTP_PORT = int(os.getenv("NGINX_HTTP_PORT", "4433"))
+HTTP_PLAIN_PORT = int(os.getenv("NGINX_HTTP_PLAIN_PORT", "4435"))
 STREAM_PORT = int(os.getenv("NGINX_STREAM_PORT", "4443"))
 OPENSSL_BIN = os.getenv("OPENSSL_BIN")
 CURL_BIN = os.getenv("CURL_BIN") or shutil.which("curl")
@@ -212,10 +219,11 @@ def fingerprints(client_hello, transport="t"):
     )
 
 
-def request(port, alpn_protocols=None):
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+def request(port, alpn_protocols=None, http_request=None, context=None):
+    if context is None:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
     if alpn_protocols:
         context.set_alpn_protocols(alpn_protocols)
 
@@ -234,6 +242,7 @@ def request(port, alpn_protocols=None):
     with socket.create_connection((HOST, port), timeout=5) as raw:
         with context.wrap_socket(raw, server_hostname=HOST) as connection:
             connection.sendall(
+                http_request or
                 b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             )
             chunks = []
@@ -281,6 +290,9 @@ def request_many_http2_settings():
                     (":path", "/"),
                 ],
                 end_stream=True,
+                priority_weight=256,
+                priority_depends_on=3,
+                priority_exclusive=True,
             )
             connection.sendall(preface + settings_frame + h2.data_to_send())
 
@@ -306,7 +318,177 @@ def request_many_http2_settings():
     return body.decode()
 
 
+def send_kernel_dropped_packets(port, stop):
+    # Anyone can send these to the port; JA4L must ignore them, not discard flows.
+    def ip(fragment, payload):
+        return struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(payload), 0, fragment,
+                           64, socket.IPPROTO_UDP, 0, b"\x7f\0\0\1", b"\x7f\0\0\1") + payload
+    fragment = ip(1, struct.pack("!HHHH", port, port, 8, 0))
+    bad_length = ip(0, struct.pack("!HHHH", port, port, 99, 0) + b"\xc0")
+    with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW) as raw:
+        while not stop.wait(0.0005):
+            raw.sendto(fragment, ("127.0.0.1", 0))
+            raw.sendto(bad_length, ("127.0.0.1", 0))
+
+
 class FingerprintTest(unittest.TestCase):
+    @unittest.skipUnless(os.getenv("JA4L_TEST"), "JA4L packet capture is not enabled")
+    def test_ja4l_packet_timestamps(self):
+        # Independent packet-socket observation, using FoxIO's A..F equations.
+        # Linux SO_TIMESTAMPNS is 35; Python does not expose it on every build.
+        timestampns = getattr(socket, "SO_TIMESTAMPNS", 35)
+        # ETH_P_ALL transmit taps share one kernel timestamp on loopback;
+        # loopback receive copies may receive different timestamps per socket.
+        with socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0003)) as capture:
+            capture.bind(("lo", 0))
+            capture.setsockopt(socket.SOL_SOCKET, timestampns, 1)
+            capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
+            stop = threading.Event()
+            noise = threading.Thread(target=send_kernel_dropped_packets, args=(HTTP_PORT, stop))
+            noise.start()
+            try:
+                response, _ = request(HTTP_PORT)
+            finally:
+                stop.set()
+                noise.join()
+            packets = []
+            while True:
+                try:
+                    packet, controls, flags, address = capture.recvmsg(
+                        65575, socket.CMSG_SPACE(struct.calcsize("@ll")), socket.MSG_DONTWAIT
+                    )
+                except BlockingIOError:
+                    break
+                if address[2] != socket.PACKET_OUTGOING or len(packet) < 40:
+                    continue
+                if packet[0] >> 4 == 4 and packet[9] == 6:
+                    offset = (packet[0] & 15) * 4
+                    end, ttl = int.from_bytes(packet[2:4]), packet[8]
+                elif packet[0] >> 4 == 6 and packet[6] == 6 and len(packet) >= 60:
+                    offset = 40
+                    end, ttl = 40 + int.from_bytes(packet[4:6]), packet[7]
+                else:
+                    continue
+                sport, dport, seq, ack = struct.unpack_from("!HHII", packet, offset)
+                if HTTP_PORT not in (sport, dport):
+                    continue
+                self.assertFalse(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+                stamp = None
+                for level, kind, value in controls:
+                    if level == socket.SOL_SOCKET and kind == timestampns:
+                        seconds, nanos = struct.unpack_from("@ll", value)
+                        stamp = seconds * 1_000_000_000 + nanos
+                self.assertIsNotNone(stamp)
+                payload = end - offset - (packet[offset + 12] >> 4) * 4
+                packets.append((sport, dport, seq, ack, packet[offset + 13], payload, stamp, ttl))
+
+        syn = next(p for p in packets if p[1] == HTTP_PORT and p[4] & 0x12 == 0x02)
+        client_port = syn[0]
+        synack = next(p for p in packets if p[0] == HTTP_PORT and p[1] == client_port and p[4] & 0x12 == 0x12)
+        ack = next(p for p in packets if p[0] == client_port and p[4] & 0x12 == 0x10 and not p[5]
+                   and p[2] == (syn[2] + 1) % 2**32 and p[3] == (synack[2] + 1) % 2**32)
+        client_first = next(p for p in packets if p[0] == client_port and p[5] and p[6] >= ack[6])
+        server_first = next(p for p in packets if p[0] == HTTP_PORT and p[1] == client_port and p[5] and p[6] >= client_first[6])
+        client_next = next(p for p in packets if p[0] == client_port and p[5] and p[6] > server_first[6])
+        client_tcp = ack[6] - synack[6]
+        client_app = client_next[6] - server_first[6]
+        values = dict(line.split(": ", 1) for line in response.splitlines() if ": " in line)
+        self.assertEqual(values["ja4l"], f"{client_tcp // 2000}_{syn[7]}_{client_app // 2000}")
+        self.assertEqual(values["ja4l_delta"], str(
+            (Decimal(client_app) / client_tcp).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        ))
+
+    def test_ja4h_cookies(self):
+        response, _ = request(
+            HTTP_PORT,
+            http_request=(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\n"
+                b"Cookie: a-b=1; a=first; z=last\r\n"
+                b"Referer: https://example.org/\r\n"
+                b"Accept-Language: en-US,en;q=0.5\r\n"
+                b"Cookie: a=second; token=x=y\r\n"
+                b"Connection: close\r\n\r\n"
+            ),
+        )
+        values = dict(line.split(": ", 1) for line in response.splitlines() if ": " in line)
+        materials = (
+            "Host,Accept-Language,Connection",
+            "a,a,a-b,token,z",
+            "a=first,a=second,a-b=1,token=x=y,z=last",
+        )
+        self.assertEqual(values["ja4h_r"], "ge11cr03enus_" + "_".join(materials))
+        self.assertEqual(
+            values["ja4h"],
+            "ge11cr03enus_" + "_".join(
+                hashlib.sha256(value.encode()).hexdigest()[:12] for value in materials
+            ),
+        )
+
+    def test_client_ja4x_certificate_oids(self):
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.x509.oid import NameOID
+        except ImportError:
+            self.skipTest("cryptography is not installed")
+        # Issuer/subject C, OU, CN and extensions SKI, AKI, Basic Constraints, in order.
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Web"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "client.example"),
+        ])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(now - datetime.timedelta(hours=1))
+            .not_valid_after(now + datetime.timedelta(hours=1))
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+            .sign(key, hashes.SHA256())
+        )
+        materials = ("550406,55040b,550403", "550406,55040b,550403", "551d0e,551d23,551d13")
+        expected = "_".join(hashlib.sha256(value.encode()).hexdigest()[:12] for value in materials)
+        with tempfile.NamedTemporaryFile(suffix=".pem") as identity:
+            identity.write(cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            identity.flush()
+            for port in (HTTP_PORT, STREAM_PORT):
+                with self.subTest(port=port):
+                    response, _ = request(port)
+                    values = dict(line.split(": ", 1) for line in response.splitlines() if ": " in line)
+                    self.assertEqual(values["client_ja4x"], "")
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    context.load_cert_chain(identity.name)
+                    response, _ = request(port, context=context)
+                    values = dict(line.split(": ", 1) for line in response.splitlines() if ": " in line)
+                    self.assertEqual(values["client_ja4x"], expected)
+                    self.assertEqual(values["client_ja4x_r"], "_".join(materials))
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and hasattr(socket, "TCP_MAXSEG"),
+        "JA4T capture requires Linux and TCP_MAXSEG",
+    )
+    def test_ja4t_saved_syn(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 1200)
+            connection.connect((HOST, HTTP_PLAIN_PORT))
+            connection.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while chunk := connection.recv(8192):
+                chunks.append(chunk)
+        values = dict(line.split(": ", 1) for line in b"".join(chunks).decode().splitlines() if ": " in line)
+        self.assertRegex(values["ja4t"], r"^\d+_(?:\d+-)*\d+_1200_\d+$")
+        self.assertEqual(values["client_ja4x"], "")
+        self.assertEqual(values["ja4h_r"], "ge11nn020000_Host,Connection__")
+
     def test_official_quic_ja4_fixture(self):
         _, _, ja4, ja4_r, _ = fingerprints(
             OFFICIAL_QUIC_CLIENT_HELLO, transport="q"
@@ -383,6 +565,16 @@ class FingerprintTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(H2Connection, "hyper-h2 is not installed")
+    def test_http2_headers_priority(self):
+        response = request_many_http2_settings()
+        fingerprint = next(
+            line.removeprefix("h2fp: ")
+            for line in response.splitlines()
+            if line.startswith("h2fp: ")
+        )
+        self.assertEqual(fingerprint.split("|")[2], "1:1:3:256")
+
+    @unittest.skipUnless(H2Connection, "hyper-h2 is not installed")
     def test_many_http2_settings(self):
         response = request_many_http2_settings()
         values = dict(
@@ -391,6 +583,10 @@ class FingerprintTest(unittest.TestCase):
             if ": " in line
         )
         settings = values["h2fp"].split("|", 1)[0]
+        # :authority must not become an invented Host field in JA4H.
+        self.assertEqual(values["ja4h_r"], "ge20nn000000___")
+        self.assertEqual(values["ja4h"], "ge20nn000000_" + "_".join(["0" * 12] * 3))
+        self.assertRegex(values["ja4t"], r"^\d+_(?:\d+-)*\d+_\d+_\d+$")
         self.assertNotIn("TRUNCATED", settings)
         self.assertEqual(len(settings.split(";")), 307)
         self.assertRegex(settings, r"(?:^|;)4096:0(?:;|$)")

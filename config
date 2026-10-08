@@ -7,6 +7,7 @@ ngx_addon_name=ngx_ssl_fingerprint_module
 
 CORE_LIBS="$CORE_LIBS"
 CORE_INCS="$CORE_INCS $ngx_addon_dir/src"
+CORE_MODULES="$CORE_MODULES ngx_ja4l_module"
 
 HTTP_MODULES="$HTTP_MODULES ngx_http_ssl_fingerprint_module"
 
@@ -22,8 +23,9 @@ fi
 
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
   $ngx_addon_dir/src/nginx_ssl_fingerprint.c \
+  $ngx_addon_dir/src/nginx_ja4plus.c \
+  $ngx_addon_dir/src/ngx_ja4l_module.c \
   $ngx_addon_dir/src/ngx_http_ssl_fingerprint_module.c \
   $stream_module"
 
 have=NGX_JA3_FINGERPRING_MODULE  . auto/have
-

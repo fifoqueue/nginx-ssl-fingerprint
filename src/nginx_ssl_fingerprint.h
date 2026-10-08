@@ -8,8 +8,13 @@
 
 
 #include <ngx_config.h>
+#include <nginx.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+
+#if (nginx_version < 1030000)
+#error "nginx-ssl-fingerprint requires nginx 1.30.0 or newer"
+#endif
 
 #define NGX_SSL_FP_POOL(c)  ((c)->ssl->fp_pool ? (c)->ssl->fp_pool : (c)->pool)
 
@@ -18,6 +23,15 @@ ngx_int_t ngx_ssl_client_hello_get_ja_data(ngx_ssl_conn_t *ssl,
 int ngx_ssl_ja3(ngx_connection_t *c);
 int ngx_ssl_ja3_hash(ngx_connection_t *c);
 int ngx_ssl_ja4(ngx_connection_t *c);
+ngx_int_t ngx_ssl_client_ja4x(ngx_connection_t *c, ngx_str_t *out,
+    ngx_flag_t raw);
+ngx_int_t ngx_tcp_ja4t(ngx_connection_t *c, ngx_str_t *out);
+ngx_int_t ngx_http_ja4h(ngx_http_request_t *r, ngx_str_t *out, ngx_flag_t raw);
+void ngx_ja4l_bind(ngx_connection_t *c);
+ngx_int_t ngx_ja4l_init_process(ngx_cycle_t *cycle);
+void ngx_ja4l_exit_process(ngx_cycle_t *cycle);
+ngx_int_t ngx_ja4l(ngx_connection_t *c, ngx_str_t *out, ngx_uint_t which,
+    ngx_flag_t plain_http);
 ngx_int_t ngx_ssl_client_alpn(ngx_connection_t *c, ngx_str_t *out);
 ngx_int_t ngx_ssl_quic_transport_params(ngx_connection_t *c, ngx_str_t *out);
 ngx_int_t ngx_ssl_quic_transport_params_normalized(ngx_connection_t *c,

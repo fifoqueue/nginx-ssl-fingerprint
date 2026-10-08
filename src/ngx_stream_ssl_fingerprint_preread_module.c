@@ -8,11 +8,7 @@
 #include <ngx_core.h>
 #include <ngx_stream.h>
 #include <ngx_md5.h>
-
-extern int ngx_ssl_ja3(ngx_connection_t *c);
-extern int ngx_ssl_ja3_hash(ngx_connection_t *c);
-extern int ngx_ssl_ja4(ngx_connection_t *c);
-extern ngx_int_t ngx_ssl_client_alpn(ngx_connection_t *c, ngx_str_t *out);
+#include <nginx_ssl_fingerprint.h>
 
 static ngx_int_t ngx_stream_ssl_fingerprint_preread_init(ngx_conf_t *cf);
 
@@ -208,7 +204,48 @@ ngx_stream_ssl_alpn(ngx_stream_session_t *s,
     return NGX_OK;
 }
 
+static ngx_int_t
+ngx_stream_ja4plus_variable(ngx_stream_session_t *s,
+    ngx_stream_variable_value_t *v, uintptr_t data)
+{
+    ngx_int_t  rc;
+    ngx_str_t  fp;
+
+    v->not_found = 1;
+    if (s->connection == NULL) {
+        return NGX_OK;
+    }
+    if (data < 2) {
+        rc = ngx_ssl_client_ja4x(s->connection, &fp, data);
+    } else if (data == 2) {
+        rc = ngx_tcp_ja4t(s->connection, &fp);
+    } else {
+        if (s->connection->ssl == NULL) {
+            return NGX_OK;
+        }
+        rc = ngx_ja4l(s->connection, &fp, data - 3, 0);
+    }
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+    if (rc == NGX_OK) {
+        v->data = fp.data;
+        v->len = fp.len;
+        v->valid = 1;
+        v->not_found = 0;
+    }
+    return NGX_OK;
+}
+
 static ngx_stream_variable_t  ngx_stream_ssl_fingerprint_variables_list[] = {
+
+    { ngx_string("stream_ssl_client_ja4x"), NULL, ngx_stream_ja4plus_variable, 0, 0, 0 },
+    { ngx_string("stream_ssl_client_ja4x_r"), NULL, ngx_stream_ja4plus_variable, 1, 0, 0 },
+    { ngx_string("stream_ssl_ja4t"), NULL, ngx_stream_ja4plus_variable, 2, 0, 0 },
+    { ngx_string("stream_ssl_ja4l"), NULL, ngx_stream_ja4plus_variable,
+      3, NGX_STREAM_VAR_NOCACHEABLE, 0 },
+    { ngx_string("stream_ssl_ja4l_delta"), NULL, ngx_stream_ja4plus_variable,
+      4, NGX_STREAM_VAR_NOCACHEABLE, 0 },
 
     {   ngx_string("stream_ssl_greased"),
         NULL,

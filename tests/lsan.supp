@@ -1,0 +1,2 @@
+# nginx never frees a worker's connection and event arrays: worker exit destroys the cycle pool that references them and calls exit(), so they are only reachable by chance (e.g. a stale epoll event pointer).
+leak:ngx_event_process_init

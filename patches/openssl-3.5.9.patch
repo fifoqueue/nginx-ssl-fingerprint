@@ -1,0 +1,60 @@
+diff --git a/ssl/ssl_lib.c b/ssl/ssl_lib.c
+index b1b36c8..6773fa4 100644
+--- a/ssl/ssl_lib.c
++++ b/ssl/ssl_lib.c
+@@ -6907,38 +6907,28 @@ err:
+ 
+ int SSL_client_hello_get_extension_order(SSL *s, uint16_t *exts, size_t *num_exts)
+ {
+-    RAW_EXTENSION *ext;
+-    size_t num = 0, i;
++    PACKET extensions, extension;
++    size_t capacity, num = 0;
++    unsigned int type;
+     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+ 
+-    if (sc == NULL)
++    if (sc == NULL || sc->clienthello == NULL || num_exts == NULL)
+         return 0;
+ 
+-    if (sc->clienthello == NULL || num_exts == NULL)
+-        return 0;
+-    for (i = 0; i < sc->clienthello->pre_proc_exts_len; i++) {
+-        ext = sc->clienthello->pre_proc_exts + i;
+-        if (ext->present)
+-            num++;
+-    }
+-    if (num == 0) {
+-        *num_exts = 0;
+-        return 1;
+-    }
+-    if (exts == NULL) {
+-        *num_exts = num;
+-        return 1;
+-    }
+-    if (*num_exts < num)
+-        return 0;
+-    for (i = 0; i < sc->clienthello->pre_proc_exts_len; i++) {
+-        ext = sc->clienthello->pre_proc_exts + i;
+-        if (ext->present) {
+-            if (ext->received_order >= num)
+-                return 0;
+-            exts[ext->received_order] = ext->type;
+-        }
++    capacity = exts == NULL ? 0 : *num_exts;
++    extensions = sc->clienthello->extensions;
++
++    while (PACKET_remaining(&extensions) > 0) {
++        if (!PACKET_get_net_2(&extensions, &type)
++            || !PACKET_get_length_prefixed_2(&extensions, &extension)
++            || (exts != NULL && num == capacity))
++            return 0;
++
++        if (exts != NULL)
++            exts[num] = (uint16_t) type;
++        num++;
+     }
++
+     *num_exts = num;
+     return 1;
+ }

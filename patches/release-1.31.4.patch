@@ -1,3 +1,230 @@
+diff --git a/auto/unix b/auto/unix
+index 4e85090..fb02228 100644
+--- a/auto/unix
++++ b/auto/unix
+@@ -534,6 +534,29 @@ ngx_feature_test="socklen_t optlen = sizeof(struct tcp_info);
+ . auto/feature
+ 
+ 
++ngx_feature="TCP_SAVE_SYN"
++ngx_feature_name="NGX_HAVE_TCP_SAVE_SYN"
++ngx_feature_run=no
++ngx_feature_incs="#include <sys/socket.h>
++                  #include <netinet/in.h>
++                  #include <netinet/tcp.h>"
++ngx_feature_path=
++ngx_feature_libs=
++ngx_feature_test="int  save_syn = 1;
++#ifndef __linux__
++#error TCP_SAVE_SYN requires Linux
++#endif
++#ifndef TCP_SAVE_SYN
++#define TCP_SAVE_SYN  27
++#endif
++#ifndef TCP_SAVED_SYN
++#define TCP_SAVED_SYN 28
++#endif
++                  setsockopt(0, IPPROTO_TCP, TCP_SAVE_SYN,
++                             &save_syn, sizeof(int))"
++. auto/feature
++
++
+ ngx_feature="accept4()"
+ ngx_feature_name="NGX_HAVE_ACCEPT4"
+ ngx_feature_run=no
+diff --git a/src/core/ngx_connection.c b/src/core/ngx_connection.c
+index 33b9b16..9f974e2 100644
+--- a/src/core/ngx_connection.c
++++ b/src/core/ngx_connection.c
+@@ -870,6 +870,23 @@ ngx_configure_listening_sockets(ngx_cycle_t *cycle)
+         }
+ #endif
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++        if (ngx_tcp_save_syn_eligible(&ls[i])
++            && (ls[i].save_syn || (ls[i].previous && ls[i].previous->save_syn)))
++        {
++            value = ls[i].save_syn ? 1 : 0;
++
++            if (setsockopt(ls[i].fd, IPPROTO_TCP, TCP_SAVE_SYN,
++                           (const void *) &value, sizeof(int))
++                == -1)
++            {
++                ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_socket_errno,
++                              "setsockopt(TCP_SAVE_SYN, %d) %V failed, ignored",
++                              value, &ls[i].addr_text);
++            }
++        }
++#endif
++
+ #if 0
+         if (1) {
+             int tcp_nodelay = 1;
+@@ -1269,6 +1286,61 @@ ngx_get_connection(ngx_socket_t s, ngx_log_t *log)
+ }
+ 
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++
++#define NGX_TCP_SAVED_SYN_MAX  512
++
++void
++ngx_connection_save_syn(ngx_connection_t *c)
++{
++    u_char     buf[NGX_TCP_SAVED_SYN_MAX], *data;
++    socklen_t  len, capacity;
++
++    if (c->pool == NULL || c->listening == NULL || !c->listening->save_syn) {
++        return;
++    }
++
++    len = NGX_TCP_SAVED_SYN_MAX;
++
++    if (getsockopt(c->fd, IPPROTO_TCP, TCP_SAVED_SYN, buf, &len) == -1) {
++        /* Linux returns the required size without consuming an oversized SYN. */
++        if (ngx_socket_errno != NGX_EINVAL || len <= sizeof(buf)) {
++            return;
++        }
++        capacity = len;
++        data = ngx_pnalloc(c->pool, capacity);
++        if (data == NULL) {
++            return;
++        }
++        if (getsockopt(c->fd, IPPROTO_TCP, TCP_SAVED_SYN, data, &len) == -1
++            || len == 0 || len > capacity)
++        {
++            ngx_pfree(c->pool, data);
++            return;
++        }
++        c->saved_syn.data = data;
++        c->saved_syn.len = len;
++        return;
++    }
++    if (len == 0 || len > sizeof(buf)) {
++        return;
++    }
++
++    c->saved_syn.data = ngx_pnalloc(c->pool, len);
++    if (c->saved_syn.data == NULL) {
++        return;
++    }
++
++    ngx_memcpy(c->saved_syn.data, buf, len);
++    c->saved_syn.len = len;
++
++    ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0,
++                   "saved SYN headers: %uz bytes", c->saved_syn.len);
++}
++
++#endif
++
++
+ void
+ ngx_free_connection(ngx_connection_t *c)
+ {
+diff --git a/src/core/ngx_connection.h b/src/core/ngx_connection.h
+index b7d2368..a55f6f8 100644
+--- a/src/core/ngx_connection.h
++++ b/src/core/ngx_connection.h
+@@ -92,6 +92,10 @@ struct ngx_listening_s {
+     int                 fastopen;
+ #endif
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++    unsigned            save_syn:1;
++#endif
++
+ };
+ 
+ 
+@@ -143,6 +147,7 @@ struct ngx_connection_s {
+     ngx_log_t          *log;
+ 
+     ngx_pool_t         *pool;
++    void               *fp_ja4l;
+ 
+     int                 type;
+ 
+@@ -203,6 +208,11 @@ struct ngx_connection_s {
+ #if (NGX_THREADS || NGX_COMPAT)
+     ngx_thread_task_t  *sendfile_task;
+ #endif
++
++#if (NGX_HAVE_TCP_SAVE_SYN)
++    ngx_str_t           saved_syn;  /* binary IP+TCP headers; empty if unset */
++    ngx_str_t           ja4t;       /* formatted JA4T; empty until first lookup */
++#endif
+ };
+ 
+ 
+@@ -234,6 +244,41 @@ ngx_int_t ngx_connection_error(ngx_connection_t *c, ngx_err_t err, char *text);
+ ngx_connection_t *ngx_get_connection(ngx_socket_t s, ngx_log_t *log);
+ void ngx_free_connection(ngx_connection_t *c);
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++
++static ngx_inline ngx_uint_t
++ngx_tcp_save_syn_eligible(ngx_listening_t *ls)
++{
++    if (ls->type != SOCK_STREAM) {
++        return 0;
++    }
++
++#if (nginx_version >= 1029007)
++    /* MPTCP ("listen ... multipath") rejects TCP_SAVE_SYN */
++    if (ls->protocol != 0 && ls->protocol != IPPROTO_TCP) {
++        return 0;
++    }
++#endif
++
++#if (NGX_QUIC)
++    if (ls->quic) {
++        return 0;
++    }
++#endif
++
++#if (NGX_HAVE_UNIX_DOMAIN)
++    if (ls->sockaddr != NULL && ls->sockaddr->sa_family == AF_UNIX) {
++        return 0;
++    }
++#endif
++
++    return 1;
++}
++
++void ngx_connection_save_syn(ngx_connection_t *c);
++
++#endif
++
+ void ngx_reusable_connection(ngx_connection_t *c, ngx_uint_t reusable);
+ 
+ #endif /* _NGX_CONNECTION_H_INCLUDED_ */
+diff --git a/src/event/ngx_event_accept.c b/src/event/ngx_event_accept.c
+index 033d7e0..3c0f378 100644
+--- a/src/event/ngx_event_accept.c
++++ b/src/event/ngx_event_accept.c
+@@ -17,6 +17,9 @@ static void ngx_reorder_accept_events(ngx_listening_t *ls);
+ static void ngx_close_accepted_connection(ngx_connection_t *c);
+ 
+ 
++void ngx_ja4l_bind(ngx_connection_t *c);
++
++
+ void
+ ngx_event_accept(ngx_event_t *ev)
+ {
+@@ -235,6 +238,11 @@ ngx_event_accept(ngx_event_t *ev)
+         c->local_sockaddr = ls->sockaddr;
+         c->local_socklen = ls->socklen;
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++        ngx_connection_save_syn(c);
++#endif
++        ngx_ja4l_bind(c);
++
+ #if (NGX_HAVE_UNIX_DOMAIN)
+         if (c->sockaddr->sa_family == AF_UNIX) {
+             c->tcp_nopush = NGX_TCP_NOPUSH_DISABLED;
 diff --git a/src/event/ngx_event_openssl.c b/src/event/ngx_event_openssl.c
 index 1f3cbb2..d208f9f 100644
 --- a/src/event/ngx_event_openssl.c
@@ -54,14 +281,16 @@ index 1f3cbb2..d208f9f 100644
                                    (const unsigned char **) &p, &len)
          == 0)
 diff --git a/src/event/ngx_event_openssl.h b/src/event/ngx_event_openssl.h
-index 0107114..ca836b1 100644
+index 0107114..560a56c 100644
 --- a/src/event/ngx_event_openssl.h
 +++ b/src/event/ngx_event_openssl.h
-@@ -114,6 +114,24 @@ struct ngx_ssl_s {
+@@ -114,6 +114,26 @@ struct ngx_ssl_s {
  };
  
  
 +typedef struct {
++    ngx_str_t                   client_ja4x;
++    ngx_str_t                   client_ja4x_raw;
 +    ngx_str_t                   alpn_str;
 +    ngx_str_t                   quic_transport_params;
 +    ngx_str_t                   quic_transport_params_str;
@@ -82,7 +311,7 @@ index 0107114..ca836b1 100644
  struct ngx_ssl_connection_s {
      ngx_ssl_conn_t             *connection;
      SSL_CTX                    *session_ctx;
-@@ -150,6 +168,16 @@ struct ngx_ssl_connection_s {
+@@ -150,6 +170,16 @@ struct ngx_ssl_connection_s {
      unsigned                    early_preread:1;
      unsigned                    write_blocked:1;
      unsigned                    sni_accepted:1;
@@ -100,7 +329,7 @@ index 0107114..ca836b1 100644
  
  
 diff --git a/src/event/quic/ngx_event_quic.c b/src/event/quic/ngx_event_quic.c
-index 09ce4b8..7804492 100644
+index 09ce4b8..1aa55b0 100644
 --- a/src/event/quic/ngx_event_quic.c
 +++ b/src/event/quic/ngx_event_quic.c
 @@ -11,6 +11,10 @@
@@ -156,10 +385,16 @@ index 09ce4b8..7804492 100644
          /*
           * RFC 9001, 4.9.1.  Discarding Initial Keys
 diff --git a/src/event/quic/ngx_event_quic_ssl.c b/src/event/quic/ngx_event_quic_ssl.c
-index 705f39f..fe676a0 100644
+index 705f39f..72527ed 100644
 --- a/src/event/quic/ngx_event_quic_ssl.c
 +++ b/src/event/quic/ngx_event_quic_ssl.c
-@@ -18,6 +18,31 @@
+@@ -15,9 +15,37 @@
+  *
+  * Implementations MUST support buffering at least 4096 bytes of data
+  */
++void ngx_ja4l_bind(ngx_connection_t *c);
++
++
  #define NGX_QUIC_MAX_BUFFERED    65535
  
  
@@ -191,7 +426,7 @@ index 705f39f..fe676a0 100644
  #if (NGX_QUIC_OPENSSL_API)
  
  static int ngx_quic_cbs_send(ngx_ssl_conn_t *ssl_conn,
-@@ -280,6 +305,8 @@ ngx_quic_cbs_got_transport_params(ngx_ssl_conn_t *ssl_conn,
+@@ -280,6 +308,8 @@ ngx_quic_cbs_got_transport_params(ngx_ssl_conn_t *ssl_conn,
      p = (u_char *) params;
      end = p + params_len;
  
@@ -200,7 +435,7 @@ index 705f39f..fe676a0 100644
      if (ngx_quic_parse_transport_params(p, end, &ctp, c->log) != NGX_OK) {
          qc->error = NGX_QUIC_ERR_TRANSPORT_PARAMETER_ERROR;
          qc->error_reason = "failed to process transport parameters";
-@@ -532,6 +559,8 @@ ngx_quic_add_handshake_data(ngx_ssl_conn_t *ssl_conn,
+@@ -532,6 +562,8 @@ ngx_quic_add_handshake_data(ngx_ssl_conn_t *ssl_conn,
          p = (u_char *) client_params;
          end = p + client_params_len;
  
@@ -209,6 +444,14 @@ index 705f39f..fe676a0 100644
          /* defaults for parameters not sent by client */
          ngx_memcpy(&ctp, &qc->ctp, sizeof(ngx_quic_tp_t));
  
+@@ -743,6 +775,7 @@ ngx_quic_handshake(ngx_connection_t *c)
+ #endif
+ 
+     c->ssl->handshaked = 1;
++    ngx_ja4l_bind(c);
+ 
+     frame = ngx_quic_alloc_frame(c);
+     if (frame == NULL) {
 diff --git a/src/event/quic/ngx_event_quic_transport.c b/src/event/quic/ngx_event_quic_transport.c
 index ba6211c..19c23be 100644
 --- a/src/event/quic/ngx_event_quic_transport.c
@@ -231,8 +474,95 @@ index ba6211c..19c23be 100644
      ngx_quic_tp_t *dst)
  {
      uint64_t   varint;
+diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
+index a97cc35..1d5b827 100644
+--- a/src/http/ngx_http.c
++++ b/src/http/ngx_http.c
+@@ -1878,6 +1878,23 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
+     ls->fastopen = addr->opt.fastopen;
+ #endif
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++    {
++        ngx_uint_t                  s;
++        ngx_http_core_srv_conf_t  **cscfp;
++
++        cscfp = addr->servers.elts;
++        for (s = 0; s < addr->servers.nelts; s++) {
++            if (cscfp[s]->tcp_save_syn
++                && ngx_tcp_save_syn_eligible(ls))
++            {
++                ls->save_syn = 1;
++                break;
++            }
++        }
++    }
++#endif
++
+ #if (NGX_HAVE_REUSEPORT)
+     ls->reuseport = addr->opt.reuseport;
+ #endif
+diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
+index fb4b227..0a43648 100644
+--- a/src/http/ngx_http_core_module.c
++++ b/src/http/ngx_http_core_module.c
+@@ -280,6 +280,13 @@ static ngx_command_t  ngx_http_core_commands[] = {
+       offsetof(ngx_http_core_srv_conf_t, underscores_in_headers),
+       NULL },
+ 
++    { ngx_string("tcp_save_syn"),
++      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_FLAG,
++      ngx_conf_set_flag_slot,
++      NGX_HTTP_SRV_CONF_OFFSET,
++      offsetof(ngx_http_core_srv_conf_t, tcp_save_syn),
++      NULL },
++
+     { ngx_string("location"),
+       NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_BLOCK|NGX_CONF_TAKE12,
+       ngx_http_core_location,
+@@ -3551,6 +3558,7 @@ ngx_http_core_create_srv_conf(ngx_conf_t *cf)
+     cscf->merge_slashes = NGX_CONF_UNSET;
+     cscf->underscores_in_headers = NGX_CONF_UNSET;
+ 
++    cscf->tcp_save_syn = NGX_CONF_UNSET;
+     cscf->file_name = cf->conf_file->file.name.data;
+     cscf->line = cf->conf_file->line;
+ 
+@@ -3598,6 +3606,8 @@ ngx_http_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+     ngx_conf_merge_value(conf->underscores_in_headers,
+                               prev->underscores_in_headers, 0);
+ 
++    ngx_conf_merge_value(conf->tcp_save_syn, prev->tcp_save_syn, 0);
++
+     if (conf->server_names.nelts == 0) {
+         /* the array has 4 empty preallocated elements, so push cannot fail */
+         sn = ngx_array_push(&conf->server_names);
+diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
+index a13d7ad..68ae477 100644
+--- a/src/http/ngx_http_core_module.h
++++ b/src/http/ngx_http_core_module.h
+@@ -205,6 +205,7 @@ typedef struct {
+     ngx_flag_t                  merge_slashes;
+     ngx_flag_t                  underscores_in_headers;
+ 
++    ngx_flag_t                  tcp_save_syn;
+     unsigned                    listen:1;
+ #if (NGX_PCRE)
+     unsigned                    captures:1;
+diff --git a/src/http/ngx_http_request.h b/src/http/ngx_http_request.h
+index 6d18cc3..5a5fcb7 100644
+--- a/src/http/ngx_http_request.h
++++ b/src/http/ngx_http_request.h
+@@ -406,6 +406,7 @@ struct ngx_http_request_s {
+     ngx_pool_t                       *pool;
+     ngx_buf_t                        *header_in;
+ 
++    ngx_table_elt_t                  *fp_synthetic_host;
+     ngx_http_headers_in_t             headers_in;
+     ngx_http_headers_out_t            headers_out;
+ 
 diff --git a/src/http/v2/ngx_http_v2.c b/src/http/v2/ngx_http_v2.c
-index ebf724d..b6b3159 100644
+index ebf724d..ea79a11 100644
 --- a/src/http/v2/ngx_http_v2.c
 +++ b/src/http/v2/ngx_http_v2.c
 @@ -1342,6 +1342,14 @@ ngx_http_v2_state_headers(ngx_http_v2_connection_t *h2c, u_char *pos,
@@ -323,6 +653,14 @@ index ebf724d..b6b3159 100644
  
      while (!ngx_queue_empty(&h2c->waiting)) {
          q = ngx_queue_head(&h2c->waiting);
+@@ -3775,6 +3824,7 @@ ngx_http_v2_construct_host_header(ngx_http_request_t *r)
+         return NGX_ERROR;
+     }
+ 
++    r->fp_synthetic_host = h;
+     h->hash = ngx_hash(ngx_hash(ngx_hash('h', 'o'), 's'), 't');
+ 
+     h->key.len = host.len;
 diff --git a/src/http/v2/ngx_http_v2.h b/src/http/v2/ngx_http_v2.h
 index beb77a5..94cd00f 100644
 --- a/src/http/v2/ngx_http_v2.h
@@ -546,4 +884,99 @@ index 6b48728..9523908 100644
 +        }
          return ngx_http_v3_process_pseudo_header(r, name, value);
      }
+ 
+diff --git a/src/os/unix/ngx_linux_config.h b/src/os/unix/ngx_linux_config.h
+index d99358c..a49176f 100644
+--- a/src/os/unix/ngx_linux_config.h
++++ b/src/os/unix/ngx_linux_config.h
+@@ -43,7 +43,14 @@
+ 
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+-#include <netinet/tcp.h>        /* TCP_NODELAY, TCP_CORK */
++#include <netinet/tcp.h>        /* TCP_NODELAY, TCP_CORK, TCP_SAVE_SYN */
++
++#ifndef TCP_SAVE_SYN
++#define TCP_SAVE_SYN   27
++#endif
++#ifndef TCP_SAVED_SYN
++#define TCP_SAVED_SYN  28
++#endif
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <sys/un.h>
+diff --git a/src/stream/ngx_stream.c b/src/stream/ngx_stream.c
+index 508ce60..0cb4c12 100644
+--- a/src/stream/ngx_stream.c
++++ b/src/stream/ngx_stream.c
+@@ -1042,6 +1042,23 @@ ngx_stream_add_listening(ngx_conf_t *cf, ngx_stream_conf_addr_t *addr)
+     ls->fastopen = addr->opt.fastopen;
+ #endif
+ 
++#if (NGX_HAVE_TCP_SAVE_SYN)
++    {
++        ngx_uint_t                    s;
++        ngx_stream_core_srv_conf_t  **cscfp;
++
++        cscfp = addr->servers.elts;
++        for (s = 0; s < addr->servers.nelts; s++) {
++            if (cscfp[s]->tcp_save_syn
++                && ngx_tcp_save_syn_eligible(ls))
++            {
++                ls->save_syn = 1;
++                break;
++            }
++        }
++    }
++#endif
++
+ #if (NGX_HAVE_REUSEPORT)
+     ls->reuseport = addr->opt.reuseport;
+ #endif
+diff --git a/src/stream/ngx_stream.h b/src/stream/ngx_stream.h
+index 9bc689e..bcf39c7 100644
+--- a/src/stream/ngx_stream.h
++++ b/src/stream/ngx_stream.h
+@@ -156,6 +156,7 @@ typedef struct {
+     ngx_str_t                      server_name;
+ 
+     ngx_flag_t                     tcp_nodelay;
++    ngx_flag_t                     tcp_save_syn;
+     size_t                         preread_buffer_size;
+     ngx_msec_t                     preread_timeout;
+ 
+diff --git a/src/stream/ngx_stream_core_module.c b/src/stream/ngx_stream_core_module.c
+index 6556c5a..a0d3daa 100644
+--- a/src/stream/ngx_stream_core_module.c
++++ b/src/stream/ngx_stream_core_module.c
+@@ -119,6 +119,13 @@ static ngx_command_t  ngx_stream_core_commands[] = {
+       offsetof(ngx_stream_core_srv_conf_t, tcp_nodelay),
+       NULL },
+ 
++    { ngx_string("tcp_save_syn"),
++      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_FLAG,
++      ngx_conf_set_flag_slot,
++      NGX_STREAM_SRV_CONF_OFFSET,
++      offsetof(ngx_stream_core_srv_conf_t, tcp_save_syn),
++      NULL },
++
+     { ngx_string("preread_buffer_size"),
+       NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_TAKE1,
+       ngx_conf_set_size_slot,
+@@ -805,6 +812,7 @@ ngx_stream_core_create_srv_conf(ngx_conf_t *cf)
+     cscf->resolver_timeout = NGX_CONF_UNSET_MSEC;
+     cscf->proxy_protocol_timeout = NGX_CONF_UNSET_MSEC;
+     cscf->tcp_nodelay = NGX_CONF_UNSET;
++    cscf->tcp_save_syn = NGX_CONF_UNSET;
+     cscf->preread_buffer_size = NGX_CONF_UNSET_SIZE;
+     cscf->preread_timeout = NGX_CONF_UNSET_MSEC;
+ 
+@@ -855,6 +863,8 @@ ngx_stream_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+ 
+     ngx_conf_merge_value(conf->tcp_nodelay, prev->tcp_nodelay, 1);
+ 
++    ngx_conf_merge_value(conf->tcp_save_syn, prev->tcp_save_syn, 0);
++
+     ngx_conf_merge_size_value(conf->preread_buffer_size,
+                               prev->preread_buffer_size, 16384);
  

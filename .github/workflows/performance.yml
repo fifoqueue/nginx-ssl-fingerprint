@@ -12,8 +12,8 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     env:
-      OPENSSL_VERSION: openssl-4.0.1
-      NGINX_VERSION: release-1.31.4
+      OPENSSL_VERSION: openssl-4.0.3
+      NGINX_VERSION: release-1.31.6
     steps:
       - name: Install packages
         run: |

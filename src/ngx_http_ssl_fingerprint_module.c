@@ -2,10 +2,15 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#if (NGX_HTTP_V2)
+#include <ngx_http_v2.h>
+#endif
 
 #include <nginx_ssl_fingerprint.h>
 
 static ngx_int_t ngx_http_ssl_fingerprint_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_ja4plus_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_ssl_greased(ngx_http_request_t *r,
                             ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_ssl_ja3(ngx_http_request_t *r,
@@ -67,14 +72,23 @@ ngx_module_t ngx_http_ssl_fingerprint_module = {
     NGX_HTTP_MODULE,                      /* module type */
     NULL,                                 /* init master */
     NULL,                                 /* init module */
-    NULL,                                 /* init process */
+    ngx_ja4l_init_process,                 /* init process */
     NULL,                                 /* init thread */
     NULL,                                 /* exit thread */
-    NULL,                                 /* exit process */
+    ngx_ja4l_exit_process,                 /* exit process */
     NULL,                                 /* exit master */
     NGX_MODULE_V1_PADDING};
 
 static ngx_http_variable_t ngx_http_ssl_fingerprint_variables_list[] = {
+    {ngx_string("http_ssl_ja4h"), NULL, ngx_http_ja4plus_variable, 0, 0, 0},
+    {ngx_string("http_ssl_ja4h_r"), NULL, ngx_http_ja4plus_variable, 1, 0, 0},
+    {ngx_string("http_ssl_client_ja4x"), NULL, ngx_http_ja4plus_variable, 2, 0, 0},
+    {ngx_string("http_ssl_client_ja4x_r"), NULL, ngx_http_ja4plus_variable, 3, 0, 0},
+    {ngx_string("http_ssl_ja4t"), NULL, ngx_http_ja4plus_variable, 4, 0, 0},
+    {ngx_string("http_ssl_ja4l"), NULL, ngx_http_ja4plus_variable,
+     5, NGX_HTTP_VAR_NOCACHEABLE, 0},
+    {ngx_string("http_ssl_ja4l_delta"), NULL, ngx_http_ja4plus_variable,
+     6, NGX_HTTP_VAR_NOCACHEABLE, 0},
     {ngx_string("http_ssl_greased"), NULL, ngx_http_ssl_greased,
      0, 0, 0},
     {ngx_string("http_ssl_ja3"), NULL, ngx_http_ssl_ja3,
@@ -132,6 +146,43 @@ static ngx_http_variable_t ngx_http_ssl_fingerprint_variables_list[] = {
 #endif
     ngx_http_null_variable
 };
+
+static ngx_int_t
+ngx_http_ja4plus_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_int_t         rc;
+    ngx_str_t         fp;
+    ngx_connection_t *c;
+
+    v->not_found = 1;
+    c = r->connection;
+#if (NGX_HTTP_V2)
+    if (r->stream) {
+        c = r->stream->connection->connection;
+    }
+#endif
+    if (data < 2) {
+        rc = ngx_http_ja4h(r, &fp, data);
+    } else if (data < 4) {
+        rc = ngx_ssl_client_ja4x(c, &fp, data - 2);
+    } else if (data == 4) {
+        rc = ngx_tcp_ja4t(c, &fp);
+    } else {
+        rc = ngx_ja4l(c, &fp, data - 5,
+                     c->ssl == NULL && r->http_version < NGX_HTTP_VERSION_20);
+    }
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+    if (rc == NGX_OK) {
+        v->data = fp.data;
+        v->len = fp.len;
+        v->valid = 1;
+        v->not_found = 0;
+    }
+    return NGX_OK;
+}
 
 static ngx_int_t
 ngx_http_ssl_greased(ngx_http_request_t *r,

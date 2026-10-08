@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import ssl
+import struct
 import unittest
 import urllib.error
 import urllib.request
@@ -18,11 +19,12 @@ except ImportError:
 try:
     from aioquic.asyncio.client import connect
     from aioquic.asyncio.protocol import QuicConnectionProtocol
+    from aioquic.buffer import Buffer
     from aioquic.h3.connection import H3_ALPN, H3Connection
     from aioquic.h3.events import DataReceived, HeadersReceived
     from aioquic.quic.configuration import QuicConfiguration
     from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated
-    from aioquic.quic.packet import QuicProtocolVersion
+    from aioquic.quic.packet import QuicProtocolVersion, QuicPacketType, pull_quic_header
 except ImportError:
     connect = None
     QuicConnectionProtocol = object
@@ -194,7 +196,7 @@ async def request(local_port, protocol=Http3Client):
         create_protocol=protocol,
         local_port=local_port,
     ) as client:
-        authority = f"{HOST}:{HTTP3_PORT}"
+        authority = f"[{HOST}]:{HTTP3_PORT}" if ":" in HOST else f"{HOST}:{HTTP3_PORT}"
         return await client.get(authority), await client.get(authority)
 
 
@@ -411,6 +413,59 @@ class Http2CompatibilityTest(unittest.TestCase):
 
 @unittest.skipUnless(connect, "aioquic is not installed")
 class QuicFingerprintTest(unittest.TestCase):
+    @unittest.skipUnless(os.getenv("JA4L_TEST"), "JA4L packet capture is not enabled")
+    def test_ja4l_quic_timestamps(self):
+        timestampns = getattr(socket, "SO_TIMESTAMPNS", 35)
+        with socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0003)) as capture:
+            capture.bind(("lo", 0))
+            capture.setsockopt(socket.SOL_SOCKET, timestampns, 1)
+            capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
+            responses = asyncio.run(request(0))
+            packets = []
+            while True:
+                try:
+                    packet, controls, flags, address = capture.recvmsg(
+                        65575, socket.CMSG_SPACE(struct.calcsize("@ll")), socket.MSG_DONTWAIT
+                    )
+                except BlockingIOError:
+                    break
+                if address[2] != socket.PACKET_OUTGOING or len(packet) < 28:
+                    continue
+                if packet[0] >> 4 == 4 and packet[9] == 17:
+                    offset, ttl = (packet[0] & 15) * 4, packet[8]
+                elif packet[0] >> 4 == 6 and len(packet) >= 48 and packet[6] == 17:
+                    offset, ttl = 40, packet[7]
+                else:
+                    continue
+                sport, dport, length = struct.unpack_from("!HHH", packet, offset)
+                if HTTP3_PORT not in (sport, dport):
+                    continue
+                self.assertFalse(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+                stamp = None
+                for level, kind, value in controls:
+                    if level == socket.SOL_SOCKET and kind == timestampns:
+                        seconds, nanos = struct.unpack_from("@ll", value)
+                        stamp = seconds * 1_000_000_000 + nanos
+                self.assertIsNotNone(stamp)
+                data = packet[offset + 8:offset + length]
+                buf = Buffer(data=data)
+                while not buf.eof() and data[buf.tell()] & 0x80:
+                    start = buf.tell()
+                    header = pull_quic_header(buf)
+                    packets.append((sport, dport, header, stamp, ttl))
+                    buf.seek(start + header.packet_length)
+
+        initial = next(p for p in packets if p[1] == HTTP3_PORT and p[2].packet_type == QuicPacketType.INITIAL)
+        client_port, cid = initial[0], initial[2].source_cid
+        server_handshake = next(p for p in packets if p[0] == HTTP3_PORT and p[1] == client_port
+                                and p[2].destination_cid == cid and p[2].packet_type == QuicPacketType.HANDSHAKE)
+        client_handshake = next(p for p in packets if p[0] == client_port and p[1] == HTTP3_PORT
+                                and p[2].source_cid == cid and p[2].packet_type == QuicPacketType.HANDSHAKE)
+        self.assertEqual(responses[0], responses[1])
+        values = dict(line.split(": ", 1) for line in responses[0].decode().splitlines() if ": " in line)
+        self.assertEqual(values["ja4l"], f"{(client_handshake[3] - server_handshake[3]) // 2000}_{initial[4]}_quic")
+        self.assertEqual(values["ja4l_delta"], "")
+
     def test_http3_fingerprint(self):
         local_port, probes = send_version_negotiation_probes(300)
         try:
@@ -427,6 +482,10 @@ class QuicFingerprintTest(unittest.TestCase):
         )
 
         self.assertTrue(values["ja4"].startswith("q13"))
+        self.assertEqual(values["ja4h_r"], "ge30nn000000___")
+        self.assertEqual(values["ja4h"], "ge30nn000000_" + "_".join(["0" * 12] * 3))
+        self.assertEqual(values["ja4t"], "")
+        self.assertEqual(values["client_ja4x"], "")
         self.assertEqual(values["alpn"], "h3")
         self.assertEqual(values["quic_version"], "00000001")
         self.assertGreaterEqual(int(values["quic_initial_size"]), 1200)
