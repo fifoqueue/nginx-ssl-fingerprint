@@ -169,11 +169,11 @@ Known integer decoding follows the current [IANA QUIC registry][iana-quic]; unre
 `http3_fingerprint` and `http3_perk` use the currently deployed [Perk-style layout][perk]: `SETTINGS|pseudo-header-order|transport-parameters|DCID-length,SCID-length`.
 The normalized aliases use the same SETTINGS, pseudo-header order, and CID lengths with sorted transport parameters.
 The raw variables preserve the individual captured fields.
-SETTINGS order and values are preserved without a fixed entry cutoff.
+SETTINGS order and values are preserved for the first 1024 entries of a connection; a client sending more is marked with a trailing `;TRUNCATED` in `http2_fingerprint` and `http3_settings`, so a SETTINGS flood cannot grow worker memory.
 
 Retry detection is exact after nginx validates the returned token.
 In a Retry flow, `quic_initial_packet_size` describes the accepted post-Retry Initial while `quic_dcid_length` is restored from the original client Initial.
-Version Negotiation spans two QUIC connections, so it is correlated heuristically by listener and client UDP endpoint for five seconds using a dynamically growing per-worker hash table.
+Version Negotiation spans two QUIC connections, so it is correlated heuristically by listener and client UDP endpoint for five seconds using a per-worker hash table capped at 4096 entries; the match is best effort, so under a spoofed datagram flood `quic_version_negotiation` may read `0`.
 
 The listed nginx releases accept QUIC v1.
 Version Negotiation records the attempted version.

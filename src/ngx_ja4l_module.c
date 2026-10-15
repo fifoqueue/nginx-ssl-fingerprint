@@ -407,6 +407,10 @@ ngx_ja4l_tcp(ngx_ja4l_packet_t *pkt, uint64_t time, ngx_flag_t incoming)
         }
         flow = ngx_ja4l_find(&pkt->key);
         if (flow && flow->isn[0] != pkt->seq) {
+            /* a bound flow has a live socket; an off-path SYN cannot replace it */
+            if (flow->ctx) {
+                return;
+            }
             ngx_ja4l_remove(flow, 1);
             flow = NULL;
         }
@@ -432,7 +436,8 @@ ngx_ja4l_tcp(ngx_ja4l_packet_t *pkt, uint64_t time, ngx_flag_t incoming)
     if (flow == NULL) {
         return;
     }
-    if (time < flow->time[0] || (pkt->flags & 0x04)) {
+    /* a genuine RST ends a bound socket, whose cleanup removes the flow */
+    if (time < flow->time[0] || ((pkt->flags & 0x04) && !flow->ctx)) {
         ngx_ja4l_remove(flow, 1);
         return;
     }
