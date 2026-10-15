@@ -854,6 +854,15 @@ ngx_ssl_quic_transport_params_raw(ngx_connection_t *c, ngx_str_t *out)
 #define NGX_SSL_QUIC_VN_INITIAL_SIZE  256
 #define NGX_SSL_QUIC_VN_TTL           5000
 
+/*
+ * Any spoofed datagram with an unsupported version adds an entry, so the
+ * cache is best effort: it stops growing at MAX_SIZE and never probes more
+ * than MAX_PROBE slots, which keeps a flood or chosen-hash collisions from
+ * costing memory or CPU; a client whose entry was dropped just reads as 0.
+ */
+#define NGX_SSL_QUIC_VN_MAX_SIZE      4096
+#define NGX_SSL_QUIC_VN_MAX_PROBE     64
+
 typedef struct {
     ngx_sockaddr_t           sockaddr;
     socklen_t                socklen;
@@ -1016,7 +1025,7 @@ ngx_ssl_quic_vn_record(ngx_connection_t *c, uint32_t version)
     {
         size = ngx_ssl_quic_vn_cache_size;
         if (ngx_ssl_quic_vn_active >= size / 2) {
-            if (size > NGX_MAX_SIZE_T_VALUE / 2) {
+            if (size >= NGX_SSL_QUIC_VN_MAX_SIZE) {
                 return;
             }
             size *= 2;
@@ -1025,13 +1034,10 @@ ngx_ssl_quic_vn_record(ngx_connection_t *c, uint32_t version)
     }
 
     hash = ngx_ssl_quic_vn_hash(c);
-
-retry:
-
     index = hash & (ngx_ssl_quic_vn_cache_size - 1);
     slot = NULL;
 
-    for (i = 0; i < ngx_ssl_quic_vn_cache_size; i++) {
+    for (i = 0; i < NGX_SSL_QUIC_VN_MAX_PROBE; i++) {
         entry = &ngx_ssl_quic_vn_cache[
             (index + i) & (ngx_ssl_quic_vn_cache_size - 1)];
 
@@ -1067,13 +1073,7 @@ retry:
     }
 
     if (slot == NULL) {
-        size = ngx_ssl_quic_vn_cache_size;
-        if (size > NGX_MAX_SIZE_T_VALUE / 2
-            || ngx_ssl_quic_vn_resize(size * 2, now) != NGX_OK)
-        {
-            return;
-        }
-        goto retry;
+        return;
     }
 
     if (!slot->used) {
@@ -1117,7 +1117,7 @@ ngx_ssl_quic_vn_match(ngx_connection_t *c, uint32_t *version)
 
     hash = ngx_ssl_quic_vn_hash(c);
     index = hash & (ngx_ssl_quic_vn_cache_size - 1);
-    for (i = 0; i < ngx_ssl_quic_vn_cache_size; i++) {
+    for (i = 0; i < NGX_SSL_QUIC_VN_MAX_PROBE; i++) {
         entry = &ngx_ssl_quic_vn_cache[
             (index + i) & (ngx_ssl_quic_vn_cache_size - 1)];
 
@@ -1813,10 +1813,10 @@ int ngx_http2_fingerprint(ngx_http_request_t *r, ngx_str_t *out)
     uint16_t id;
 
     if (h2c->fp_prefix.data == NULL) {
-        if (h2c->fp_settings.len > (NGX_MAX_SIZE_T_VALUE - 12) / 17) {
+        if (h2c->fp_settings.len > (NGX_MAX_SIZE_T_VALUE - 22) / 17) {
             return NGX_ERROR;
         }
-        n = 12 + h2c->fp_settings.len * 17;
+        n = 22 + h2c->fp_settings.len * 17;
         h2c->fp_prefix.data = ngx_pnalloc(h2c->connection->pool, n);
         if (h2c->fp_prefix.data == NULL) {
             return NGX_ERROR;
@@ -1836,6 +1836,9 @@ int ngx_http2_fingerprint(ngx_http_request_t *r, ngx_str_t *out)
             pstr = append_uint16(pstr, id);
             *pstr++ = ':';
             pstr = append_uint32(pstr, setting->value);
+        }
+        if (h2c->fp_settings.truncated) {
+            pstr = ngx_cpymem(pstr, ";TRUNCATED", sizeof(";TRUNCATED") - 1);
         }
         *pstr++ = '|';
         pstr = append_uint32(pstr, h2c->fp_windowupdate);
@@ -1935,10 +1938,10 @@ ngx_http3_settings(ngx_http_request_t *r, ngx_str_t *out)
         return NGX_OK;
     }
 
-    if (h3c->fp_settings.len > (NGX_MAX_SIZE_T_VALUE - 1) / 42) {
+    if (h3c->fp_settings.len > (NGX_MAX_SIZE_T_VALUE - 11) / 42) {
         return NGX_ERROR;
     }
-    n = h3c->fp_settings.len * 42 + 1;
+    n = h3c->fp_settings.len * 42 + 11;
     h3c->fp_settings_str.data = ngx_pnalloc(r->connection->quic->parent->pool,
                                             n);
     if (h3c->fp_settings_str.data == NULL) {
@@ -1961,6 +1964,9 @@ ngx_http3_settings(ngx_http_request_t *r, ngx_str_t *out)
         p = append_uint64(p, setting->id);
         *p++ = ':';
         p = append_uint64(p, setting->value);
+    }
+    if (h3c->fp_settings.truncated) {
+        p = ngx_cpymem(p, ";TRUNCATED", sizeof(";TRUNCATED") - 1);
     }
 
     h3c->fp_settings_str.len = p - h3c->fp_settings_str.data;

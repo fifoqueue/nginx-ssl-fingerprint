@@ -137,6 +137,35 @@ class ManySettingsH3Connection(H3Connection):
         return settings
 
 
+class TruncatedSettingsH3Connection(H3Connection):
+    def _get_local_settings(self):
+        settings = super()._get_local_settings()
+        settings.update({0x100 + index: index for index in range(1100)})
+        return settings
+
+    def _init_connection(self):
+        # aioquic encodes SETTINGS into a 1024-byte buffer; this frame is larger.
+        import aioquic.h3.connection as h3
+
+        def encode_settings(settings):
+            buf = Buffer(capacity=65536)
+            for setting, value in settings.items():
+                buf.push_uint_var(setting)
+                buf.push_uint_var(value)
+            return buf.data
+
+        original = h3.encode_settings
+        h3.encode_settings = encode_settings
+        try:
+            super()._init_connection()
+        finally:
+            h3.encode_settings = original
+
+
+class TruncatedSettingsClient(Http3Client):
+    http_connection_class = TruncatedSettingsH3Connection
+
+
 class PerkTransportClient(Http3Client):
     http_connection_class = ManySettingsH3Connection
 
@@ -465,6 +494,17 @@ class QuicFingerprintTest(unittest.TestCase):
         values = dict(line.split(": ", 1) for line in responses[0].decode().splitlines() if ": " in line)
         self.assertEqual(values["ja4l"], f"{(client_handshake[3] - server_handshake[3]) // 2000}_{initial[4]}_quic")
         self.assertEqual(values["ja4l_delta"], "")
+
+    def test_truncated_http3_settings(self):
+        # Settings beyond the cap are not stored, so one huge frame cannot grow memory.
+        responses = asyncio.run(request(0, TruncatedSettingsClient))
+        values = dict(
+            line.split(": ", 1)
+            for line in responses[0].decode().splitlines()
+            if ": " in line
+        )
+        self.assertTrue(values["h3_settings"].endswith(";TRUNCATED"))
+        self.assertEqual(len(values["h3_settings"].split(";")), 1024 + 1)
 
     def test_http3_fingerprint(self):
         local_port, probes = send_version_negotiation_probes(300)

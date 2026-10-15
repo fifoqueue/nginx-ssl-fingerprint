@@ -254,7 +254,7 @@ def request(port, alpn_protocols=None, http_request=None, context=None):
     return b"".join(chunks).decode(), client_hellos[0]
 
 
-def request_many_http2_settings():
+def request_many_http2_settings(count=300):
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -266,13 +266,13 @@ def request_many_http2_settings():
             h2.initiate_connection()
             preface = h2.data_to_send()
 
-            # Track a second SETTINGS ACK in hyper-h2, but send 300 entries.
+            # Track a second SETTINGS ACK in hyper-h2, but send `count` entries.
             h2.update_settings({0x10: 0})
             h2.data_to_send()
             payload = b"".join(
                 (0x1000 + index).to_bytes(2, "big")
                 + index.to_bytes(4, "big")
-                for index in range(300)
+                for index in range(count)
             )
             settings_frame = (
                 len(payload).to_bytes(3, "big")
@@ -591,6 +591,19 @@ class FingerprintTest(unittest.TestCase):
         self.assertEqual(len(settings.split(";")), 307)
         self.assertRegex(settings, r"(?:^|;)4096:0(?:;|$)")
         self.assertRegex(settings, r"(?:^|;)4395:299(?:;|$)")
+
+    @unittest.skipUnless(H2Connection, "hyper-h2 is not installed")
+    def test_truncated_http2_settings(self):
+        # Settings beyond the cap are not stored, so a flood cannot grow memory.
+        response = request_many_http2_settings(1100)
+        values = dict(
+            line.split(": ", 1)
+            for line in response.splitlines()
+            if ": " in line
+        )
+        settings = values["h2fp"].split("|", 1)[0]
+        self.assertTrue(settings.endswith(";TRUNCATED"))
+        self.assertEqual(len(settings.split(";")), 1024 + 1)
 
     @unittest.skipUnless(OPENSSL_BIN, "OPENSSL_BIN is not set")
     def test_many_unknown_extensions(self):
